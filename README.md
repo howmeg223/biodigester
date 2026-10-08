@@ -53,7 +53,8 @@ a live controller update before allowing range changes.
 |---|---|
 | `dashboard.py` | Monitoring app, MQTT readings, CSV logging and reports |
 | `controller.py` | Receives readings and sends heating decisions |
-| `control_logic.py` | Heating rules, validation, timers and alarms |
+| `control_logic.py` | Heating rules, range validation and minimum on/off timers |
+| `fault_handling.py` | `FaultHandler`: sensor checks, temperature alarms and heater feedback alarms |
 | `simulator.py` | Simulated tank, heater and all three demo sensors |
 | `config.py` | Broker address, temperature limits and simulation settings |
 | `mqtt_common.py` | Shared MQTT connection and message helpers |
@@ -61,6 +62,10 @@ a live controller update before allowing range changes.
 | `archive/before-simplification.zip` | Complete source backup, including the old desktop app and experiment tools |
 
 Start reading `config.py`, then `control_logic.py`, then `controller.py`.
+Each `Regulator` owns a `FaultHandler`. The handler detects problems and keeps
+the heater mismatch timer; the regulator decides the heater state, including
+forcing it off when a sensor fault is reported. Simulator fault buttons still
+inject test faults through MQTT.
 MQTT is the message delivery service; its broker passes JSON messages between
 programs using addresses called topics. `with lock:` protects shared values
 while MQTT receives messages in the background.

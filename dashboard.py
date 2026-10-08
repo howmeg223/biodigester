@@ -1,4 +1,16 @@
-"""Browser monitor. Run python dashboard.py --demo, then open localhost:8050."""
+"""
+What should be in the dashboard file:
+- The cosmetics of anything displayed on the dashboard
+- It should not contain the classes for faults, and the sensor data.
+
+- Separate the fault handling and real data
+
+
+
+"""
+
+
+
 import argparse
 import csv
 import json

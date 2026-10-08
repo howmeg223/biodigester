@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass, field
 import config
+from fault_handling import FaultHandler, MESSAGES, TEMP_HIGH
 
 
 # 1. The on/off rule
@@ -31,7 +32,7 @@ def decide_hysteresis(temp_c, heating, th):
     return heating        # inside the band: keep doing what we were doing
 
 
-# Settings, fault codes and alarm codes
+# Control settings
 @dataclass
 class Settings:
     """Limits and timers for the Regulator. All times are in seconds."""
@@ -48,42 +49,7 @@ class Settings:
     min_band_c: float = config.MIN_BAND_C
 
 
-# Faults: the reading cannot be trusted, so the heater is forced OFF.
-NO_READING = "NO_READING"
-SENSOR_STALE = "SENSOR_STALE"
-SENSOR_BAD_VALUE = "SENSOR_BAD_VALUE"
-
-# Alarms: the loop is still running, but someone should look at it.
-TEMP_LOW = "TEMP_LOW"
-TEMP_HIGH = "TEMP_HIGH"
-HEATER_NOT_RESPONDING = "HEATER_NOT_RESPONDING"
-
-# Plain-language text for each code, shown in the app and the logs.
-MESSAGES = {
-    NO_READING: "No temperature reading has arrived yet. Heating is off.",
-    SENSOR_STALE: "The sensor has stopped reporting. Heating is off until readings return.",
-    SENSOR_BAD_VALUE: "The sensor reading is not a believable temperature. Heating is off.",
-    TEMP_LOW: "Temperature is well below the target range.",
-    TEMP_HIGH: "Temperature is well above the target range.",
-    HEATER_NOT_RESPONDING: "The heater is not doing what it was told.",
-}
-
-
-# 2. Can this reading be trusted?
-def check_reading(temp_c, age_s, settings):
-    """Return a fault code if the reading must not be used, otherwise None."""
-    if temp_c is None or age_s is None:
-        return NO_READING
-    if age_s > settings.stale_after_s:
-        return SENSOR_STALE
-    if not math.isfinite(temp_c):
-        return SENSOR_BAD_VALUE
-    if temp_c < settings.plausible_min_c or temp_c > settings.plausible_max_c:
-        return SENSOR_BAD_VALUE
-    return None
-
-
-# 3. Are these thresholds sane?
+# Range validation
 def check_thresholds(low, high, settings):
     """Return None if (low, high) may be used, otherwise a reason to show the user."""
     try:
@@ -102,7 +68,7 @@ def check_thresholds(low, high, settings):
     return None
 
 
-# 4. The Regulator
+# The Regulator
 @dataclass
 class Decision:
     """What the Regulator decided on one update."""
@@ -126,7 +92,7 @@ class Regulator:
         self.settings = settings
         self.heating = False            # current command
         self._last_switch = None        # time of the last on/off change
-        self._mismatch_since = None     # when heater and command first disagreed
+        self.fault_handler = FaultHandler(self.settings)
 
     def set_thresholds(self, low, high):
         """Apply new thresholds if they are sane."""
@@ -140,18 +106,14 @@ class Regulator:
         settings = self.settings
 
         # 1. Fail-safe. No trustworthy reading means no heating.
-        fault = check_reading(temp_c, reading_age_s, settings)
+        fault = self.fault_handler.check_reading(temp_c, reading_age_s)
         if fault:
             self._switch(False, now)
-            alarms = self._heater_alarm(now, heater_reported_on)
+            alarms = self.fault_handler.heater_alarms(now, self.heating, heater_reported_on)
             return Decision(False, "FAULT", fault, alarms, MESSAGES[fault])
 
         # 2. Alarms for a temperature well outside the band.
-        alarms = []
-        if temp_c < self.th.low - settings.alarm_margin_c:
-            alarms.append(TEMP_LOW)
-        if temp_c > self.th.high + settings.alarm_margin_c:
-            alarms.append(TEMP_HIGH)
+        alarms = self.fault_handler.temperature_alarms(temp_c, self.th)
 
         # 3. Work out whether the temperature rule requests heating.
         if settings.strategy == "simple":
@@ -176,7 +138,7 @@ class Regulator:
         else:
             reason = "Too cold, waiting out the minimum off time before heating again."
 
-        alarms += self._heater_alarm(now, heater_reported_on)
+        alarms += self.fault_handler.heater_alarms(now, self.heating, heater_reported_on)
         if self.heating:
             mode = "HEATING"
         else:
@@ -209,13 +171,3 @@ class Regulator:
             return "Inside the target range: heating until the top of the range."
         return "Inside the target range: heating off until the bottom of the range."
 
-    def _heater_alarm(self, now, reported_on):
-        """Alarm if the heater has disagreed with the command for too long."""
-        if reported_on is None or reported_on == self.heating:
-            self._mismatch_since = None
-            return []
-        if self._mismatch_since is None:
-            self._mismatch_since = now
-        if now - self._mismatch_since >= self.settings.actuator_timeout_s:
-            return [HEATER_NOT_RESPONDING]
-        return []

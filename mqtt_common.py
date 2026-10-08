@@ -1,4 +1,7 @@
-"""mqtt_common.py - the few MQTT helpers shared by the controller, simulator and app."""
+"""
+The common config necessary for both dashboard and control regulation. 
+
+"""
 
 import json
 import time

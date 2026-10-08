@@ -1,4 +1,7 @@
-"""simulator.py - an MQTT stand-in for the digester hardware."""
+"""
+Print out simulated data
+
+"""
 
 import argparse
 import math

@@ -9,7 +9,8 @@ import threading
 import time
 
 import config
-from control_logic import MESSAGES, Regulator, Settings, Thresholds
+from control_logic import Regulator, Settings, Thresholds
+from fault_handling import MESSAGES
 from mqtt_common import connect_and_start, connected_ok, make_client, read_json, send
 
 

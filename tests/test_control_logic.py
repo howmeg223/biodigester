@@ -19,10 +19,12 @@ import random
 import pytest
 
 from control_logic import (
-    HEATER_NOT_RESPONDING, NO_READING, SENSOR_BAD_VALUE, SENSOR_STALE,
-    TEMP_HIGH, TEMP_LOW,
     Regulator, Settings, Thresholds,
-    check_reading, check_thresholds, decide_hysteresis, decide_simple,
+    check_thresholds, decide_hysteresis, decide_simple,
+)
+from fault_handling import (
+    FaultHandler, HEATER_NOT_RESPONDING, NO_READING, SENSOR_BAD_VALUE,
+    SENSOR_STALE, TEMP_HIGH, TEMP_LOW,
 )
 from simulator import DigesterModel
 
@@ -127,7 +129,7 @@ def test_simple_boundaries(temp, expected):
     (float("inf"), 1.0, SENSOR_BAD_VALUE),
 ])
 def test_check_reading(temp, age, expected):
-    assert check_reading(temp, age, Settings(stale_after_s=10.0)) == expected
+    assert FaultHandler(Settings(stale_after_s=10.0)).check_reading(temp, age) == expected
 
 
 def test_stale_reading_forces_heater_off():
@@ -301,6 +303,26 @@ def test_no_heater_feedback_means_no_heater_alarm():
     reg = make_regulator(actuator_timeout_s=5.0)
     reg.update(0, 34.5, 0)
     assert reg.update(100, 34.5, 0).alarms == []
+
+
+def test_fault_handlers_have_independent_heater_timers():
+    first = FaultHandler(Settings(actuator_timeout_s=5.0))
+    second = FaultHandler(Settings(actuator_timeout_s=5.0))
+    assert first.heater_alarms(0, commanded_on=True, reported_on=False) == []
+    assert second.heater_alarms(4, commanded_on=True, reported_on=False) == []
+    assert first.heater_alarms(5, commanded_on=True, reported_on=False) == [HEATER_NOT_RESPONDING]
+    assert second.heater_alarms(5, commanded_on=True, reported_on=False) == []
+    assert second.heater_alarms(9, commanded_on=True, reported_on=False) == [HEATER_NOT_RESPONDING]
+
+
+@pytest.mark.parametrize("reported_on", [False, None])
+def test_heater_agreement_or_missing_feedback_resets_fault_timer(reported_on):
+    handler = FaultHandler(Settings(actuator_timeout_s=5.0))
+    assert handler.heater_alarms(0, commanded_on=True, reported_on=False) == []
+    assert handler.heater_alarms(5, commanded_on=False, reported_on=reported_on) == []
+    assert handler.heater_alarms(6, commanded_on=True, reported_on=False) == []
+    assert handler.heater_alarms(10, commanded_on=True, reported_on=False) == []
+    assert handler.heater_alarms(11, commanded_on=True, reported_on=False) == [HEATER_NOT_RESPONDING]
 
 
 def test_simple_strategy_chatters_and_hysteresis_does_not():
