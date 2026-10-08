@@ -1,4 +1,8 @@
-"""controller.py - the temperature controller, as its own program."""
+"""
+What should be on the controller program:
+
+
+"""
 
 import argparse
 import json
@@ -9,8 +13,7 @@ import threading
 import time
 
 import config
-from control_logic import Regulator, Settings, Thresholds
-from fault_handling import MESSAGES
+from control_logic import MESSAGES, Regulator, Settings, Thresholds
 from mqtt_common import connect_and_start, connected_ok, make_client, read_json, send
 
 
