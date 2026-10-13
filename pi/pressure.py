@@ -21,8 +21,8 @@ MQTT_TOPIC_RAW = "digester/pressure_raw"
 MQTT_TOPIC_DROP = "digester/pressure_drop"
 MQTT_TOPIC_THRESHOLD = "digester/pressure_threshold"
 
-MQTT_TOPIC_BUBBLE = "digester/bubble"
-MQTT_TOPIC_BUBBLE_EVENT = "digester/bubble/event"
+MQTT_TOPIC_BUBBLE = "bubble"
+MQTT_TOPIC_BUBBLE_EVENT = "bubble/event"
 
 # Don't publish all 40 samples/sec over MQTT.
 # Detection still happens at the full sensor rate.
