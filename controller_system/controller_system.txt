@@ -1,0 +1,61 @@
+The controller_system folder manages temperature readings,
+fault detection and heater control.
+
+The controller runs independently of the dashboard. Settings and limits
+come from config.py in the main project folder.
+
+biodigester_controller:
+- connects the sensor, process and heater monitors to the fault manager
+- configures MQTT subscriptions and the offline message
+- checks faults before deciding whether heating is allowed
+- sends heater commands, safety commands, fault events and controller status
+- runs one control cycle each time step() is called by controller.py
+
+fault_manager:
+- defines each fault's message, severity and automatic action
+- tracks whether a fault is active and acknowledged
+- raises, reasserts, acknowledges and clears faults
+- keeps latching faults active until the condition clears and they are acknowledged
+- reports whether heating must stop or the safety cut-out must trip
+
+heater_monitor:
+- compares the previous heater command with the reported relay state
+- detects a heater that fails to turn on or stays on after an OFF command
+- checks whether temperature rises while the heater reports ON
+- reports whether the independent safety cut-out is tripped
+
+models:
+- defines fault categories and severity levels
+- FaultDefinition stores the fixed rules for each type of fault
+- FaultState stores the changing status of an individual fault
+- converts fault details to dictionaries for MQTT messages
+
+process_monitor:
+- compares trustworthy temperature readings against process alarm limits
+- detects low, high and high-high temperatures
+- uses limits that are separate from the normal target range
+
+sensor_monitor:
+- stores the latest temperature reading and when it arrived
+- checks for missing, stale, out-of-range and frozen readings
+- returns a trustworthy reading or None if it should not be used
+
+temperature_control:
+- validates requested lower and upper temperatures
+- decides when the heater should be ON or OFF
+- hysteresis keeps the previous heater state inside the target range
+- the simple strategy uses the midpoint as a single target
+- applies minimum ON/OFF times during normal control
+- turns heating off immediately when faults prevent heating
+
+Suggested reading order:
+models -> sensor_monitor -> process_monitor -> heater_monitor
+-> fault_manager -> temperature_control -> biodigester_controller
+
+Useful terms:
+- MQTT: a messaging system that delivers messages through a broker
+- topic: the address a program publishes or subscribes to
+- stale: a reading that is too old to use
+- acknowledged: the operator has marked a fault as seen
+- latching: a fault stays active after its cause disappears until acknowledged
+- safety cut-out: a separate switch that removes heater power
