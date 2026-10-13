@@ -156,7 +156,7 @@ NOISE_ALPHA = 0.01
 #
 # Leave these None unless you also want to publish kPa.
 
-ZERO_RAW = None
+ZERO_RAW = 1339145
 CAL_RAW = None
 CAL_KPA = None
 
