@@ -131,12 +131,35 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
     html.H2("Biodigester Monitoring Application"),
     html.Div(id="status", style={"marginBottom": "12px"}),
 
+    html.H3("Live sensors"),
+    html.Div([sensor_card(key) for key in config.SENSORS], style={"display": "flex", "flexWrap": "wrap"}),
+    html.P("pH is intentionally not simulated yet. The project contains a reserved pH topic/configuration for later implementation.",
+           style={"fontStyle": "italic", "color": "#555"}),
+
+    dcc.Interval(id="tick", interval=2000),
+    dcc.Store(id="selected", data=first_key),
+    dcc.Tabs([
+        dcc.Tab(label="Sensor history", children=[
+            html.H3(id="sensor-title"), html.P(id="sensor-desc"),
+            dcc.Dropdown(range_options, "Last hour", id="hist-range", clearable=False, style={"width": "220px"}),
+            dcc.Graph(id="hist-graph"),
+        ]),
+        dcc.Tab(label="Report", children=[
+            html.Div(style={"marginTop": "12px"}, children=[
+                dcc.Checklist(id="report-sensors", value=[first_key], inline=True,
+                              options=[{"label": f" {config.SENSORS[k]['label']}  ", "value": k}
+                                       for k in config.SENSORS]),
+                dcc.Dropdown(range_options, "Last hour", id="report-range", clearable=False, style={"width": "220px"}),
+                dcc.Graph(id="report-graph"),
+            ])
+        ]),
+    ]),
+
     html.Div(style={"background": "#f3f5f4", "padding": "16px", "borderRadius": "10px"}, children=[
         html.H3("Controller and heater"),
         html.Div(id="controller-status", role="status"),
         html.Div(style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "marginTop": "12px"}, children=[
-            html.Label("Lower temperature (°C)", htmlFor="range-low"),
-            dcc.Input(id="range-low", type="number", value=config.DEFAULT_LOW_C, step=0.1),
+                dcc.Input(id="range-low", type="number", value=config.DEFAULT_LOW_C, step=0.1),
             html.Label("Upper temperature (°C)", htmlFor="range-high"),
             dcc.Input(id="range-high", type="number", value=config.DEFAULT_HIGH_C, step=0.1),
             html.Button("Save range", id="save-range", n_clicks=0),
@@ -166,31 +189,7 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
         ]),
         html.Div(id="fault-result", role="status"),
         html.Div(id="sim-status"),
-    ]),
-
-    html.H3("Live sensors"),
-    html.Div([sensor_card(key) for key in config.SENSORS], style={"display": "flex", "flexWrap": "wrap"}),
-    html.P("pH is intentionally not simulated yet. The project contains a reserved pH topic/configuration for later implementation.",
-           style={"fontStyle": "italic", "color": "#555"}),
-
-    dcc.Interval(id="tick", interval=2000),
-    dcc.Store(id="selected", data=first_key),
-    dcc.Tabs([
-        dcc.Tab(label="Sensor history", children=[
-            html.H3(id="sensor-title"), html.P(id="sensor-desc"),
-            dcc.Dropdown(range_options, "Last hour", id="hist-range", clearable=False, style={"width": "220px"}),
-            dcc.Graph(id="hist-graph"),
-        ]),
-        dcc.Tab(label="Report", children=[
-            html.Div(style={"marginTop": "12px"}, children=[
-                dcc.Checklist(id="report-sensors", value=[first_key], inline=True,
-                              options=[{"label": f" {config.SENSORS[k]['label']}  ", "value": k}
-                                       for k in config.SENSORS]),
-                dcc.Dropdown(range_options, "Last hour", id="report-range", clearable=False, style={"width": "220px"}),
-                dcc.Graph(id="report-graph"),
-            ])
-        ]),
-    ]),
+    ]),    html.Label("Lower temperature (°C)", htmlFor="range-low"),
 ])
 
 
