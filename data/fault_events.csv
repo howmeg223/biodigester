@@ -1,0 +1,99 @@
+timestamp,event,code,category,severity,message,action
+2026-10-13T15:42:54,RAISED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T15:42:55,CLEARED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T15:49:17,RAISED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T15:49:18,CLEARED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T15:49:18,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:20,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:21,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:22,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:23,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:24,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:25,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:26,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:27,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:28,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:29,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:30,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:31,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:32,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:33,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:34,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:35,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:41,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:42,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:43,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:44,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:45,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:46,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:47,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:48,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:49,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:50,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:51,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:52,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:53,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:54,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:55,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:56,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:57,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:58,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:49:59,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:50:00,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:50:01,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:50:02,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:50:03,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:50:04,RAISED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:50:05,CLEARED,LOW_TEMPERATURE,PROCESS,WARNING,Digester temperature is below the process warning limit.,Continue monitoring while normal temperature control attempts recovery.
+2026-10-13T15:55:08,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:09,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:10,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:11,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:13,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:13,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:14,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:15,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:16,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:17,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:18,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:19,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:20,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:21,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:22,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:23,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:24,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:55:25,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:40,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:41,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:42,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:43,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:44,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:45,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:46,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:47,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:48,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:56:49,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:11,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:12,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:13,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:14,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:15,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:16,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:17,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:18,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:21,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:22,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:25,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:26,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:27,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:28,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:29,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:30,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:31,RAISED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T15:58:32,CLEARED,HIGH_TEMPERATURE,PROCESS,ERROR,Digester temperature is above the high-temperature limit.,Normal heating is forced off and the operator is notified.
+2026-10-13T16:41:49,RAISED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T16:41:50,CLEARED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T16:46:23,RAISED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T16:46:24,CLEARED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T16:47:59,RAISED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
+2026-10-13T16:49:03,RAISED,TEMP_SENSOR_NO_DATA,SENSOR,CRITICAL,No temperature reading has been received.,Heating is disabled until a trustworthy temperature is available.
