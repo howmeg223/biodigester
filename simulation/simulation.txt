@@ -1,0 +1,47 @@
+The simulation folder provides a demonstration digester,
+sensors and heater so the project can run without real hardware.
+
+simulator_service:
+- configures MQTT subscriptions for heater, safety and test-fault commands
+- creates the tank model, sensors, heater and fault injector
+- advances the tank temperature using simulated elapsed time
+- publishes temperature, pressure, heater state and simulator status
+- checks for missing controller commands using the heater watchdog
+- runs until stopped by simulator.py
+
+digester_model:
+- estimates tank temperature from heater power and heat lost to surrounding air
+- treats the slurry as water for its heat-capacity calculation
+- models a delay in heater response
+- provides an air temperature that varies over a simulated day
+- uses demonstration values from config.py
+
+devices:
+- SimulatedTemperatureSensor adds noise to the model's true temperature
+- can stop temperature readings, freeze them or send an implausible reading
+- SimulatedPressureSensor produces example pressure readings
+- SimulatedHeater models the normal relay and an independent safety cut-out
+- can mimic an ON relay that produces no heat or a relay stuck ON
+- trips the safety cut-out if controller commands stop arriving
+
+fault_injector:
+- returns the simulated devices to normal before applying a scenario
+- applies one selected sensor or heater failure
+- changes device behaviour without telling the controller which failure was chosen
+- clearing a scenario does not reset the safety cut-out or acknowledge faults
+
+Suggested reading order:
+digester_model -> devices -> fault_injector -> simulator_service -> ../simulator.py
+
+Data flow:
+heater command -> simulated heater -> tank model -> simulated temperature sensor
+-> MQTT reading -> controller
+
+Useful terms:
+- true temperature: the model's temperature before sensor noise or faults
+- noise: small random changes added to mimic sensor readings
+- watchdog: a timer that detects when controller commands stop
+- relay: the normal ON/OFF switch for the heater
+- simulation speed: simulated seconds per real second (60 by default)
+
+Pressure is displayed only. pH is reserved in config.py but is not simulated yet.
