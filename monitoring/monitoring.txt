@@ -1,0 +1,43 @@
+The monitoring folder receives data for the dashboard,
+saves history and records fault notifications.
+
+The dashboard uses these classes to display information and send requests.
+The controller_system folder makes the actual heater and safety decisions.
+
+monitoring_service:
+- connects the dashboard to the MQTT broker
+- subscribes to sensor readings, controller status, heater state and fault messages
+- checks message formats before storing them
+- stores the latest readings and messages for dashboard.py
+- logs new sensor readings and fault events through DataLogger
+- shows the controller as offline when live status is missing or stale
+- sends range changes, fault acknowledgements and simulator requests
+- uses a lock because MQTT receives messages in a background thread
+
+data_logger:
+- creates the data folder and CSV files when needed
+- writes a header for each new or empty log file
+- appends timestamp, sensor name and value to readings.csv
+- appends fault changes and their details to fault_events.csv
+- gets the log file locations from MonitoringService
+
+notification_manager:
+- stores recent fault events with the time they were received
+- keeps the newest event first and limits the history to 50 events by default
+- prints raised and reasserted faults in the terminal
+- supplies recent events to the dashboard
+- can be extended later to send email, SMS or push notifications
+
+Suggested reading order:
+data_logger -> notification_manager -> monitoring_service -> ../dashboard.py
+
+Data flow:
+MQTT message -> MonitoringService -> DataLogger / NotificationManager
+-> dashboard display
+
+Useful terms:
+- JSON: the text format used to send dictionaries in MQTT messages
+- CSV: a table stored as text that can be opened in a spreadsheet
+- retained: a saved broker message; readings are displayed but not logged again
+- snapshot: a copy of the latest shared data for the dashboard to read
+- monotonic time: an elapsed-time clock used for freshness checks
