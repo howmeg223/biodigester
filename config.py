@@ -13,8 +13,8 @@ KEEPALIVE_S = 30
 MQTT_USERNAME = None
 MQTT_PASSWORD = None
 
-MQTT_ROOT = "biodigester"
-MQTT_RETAIN = 
+ROOT = "biodigester"
+MQTT_RETAIN = True
 
 
 TOPIC_TEMPERATURE = f"{ROOT}/sensors/temperature"

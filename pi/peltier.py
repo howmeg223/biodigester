@@ -4,662 +4,340 @@ import logging
 import math
 import threading
 import time
+import config
+from mqtt_common import connect_and_start, connected_ok, make_client, read_json, send
 
-import lgpio
-import paho.mqtt.client as mqtt
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-# MQTT broker
-MQTT_BROKER = "127.0.01"
-MQTT_PORT = 1883
-MQTT_TOPIC = "peltier/power"
-
-# Set these if your broker requires authentication
-MQTT_USERNAME = None
-MQTT_PASSWORD = None
-
-# Raspberry Pi 5 GPIO chip
-GPIO_CHIP = 0
-
-# BCM GPIO numbers
-#
-# GPIO18 -> BTS7960 RPWM
-# GPIO19 -> BTS7960 LPWM
-RPWM_PIN = 18
-LPWM_PIN = 19
-
-# PWM frequency in Hz
-PWM_FREQUENCY = 1000
-
-# When reversing direction, turn everything off for this long
-DIRECTION_CHANGE_DELAY = 0.050  # 50 ms
-
-# If no valid MQTT command is received for this many seconds,
-# shut the Peltier off.
-MQTT_TIMEOUT = None
-
-# Commands smaller than this are treated as zero
-DEADBAND = 1.0
+log = logging.getLogger("peltier-hardware")
 
 
-# ============================================================
-# LOGGING
-# ============================================================
+class PeltierHardwareClient:
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.client = make_client("biodigester-peltier-hardware")
+        self.gpio = None
+        self.lock = threading.RLock()
+        self.current_direction = 0
+        self.requested_power = 0.0
+        self.applied_power = 0.0
+        self.last_command_time = None
+        self.watchdog_timed_out = False
+        self.safety_latched = False
+        self.last_error = None
+        self._configure_mqtt()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
-
-log = logging.getLogger("peltier")
-
-
-# ============================================================
-# GLOBAL STATE
-# ============================================================
-
-gpio = None
-
-lock = threading.Lock()
-
-current_direction = 0
-last_command_time = 0.0
-timed_out = False
-
-
-# ============================================================
-# GPIO FUNCTIONS
-# ============================================================
-
-def setup_gpio():
-    """
-    Open /dev/gpiochip0 and claim the two PWM GPIOs.
-    Both outputs start LOW.
-    """
-    global gpio
-
-    log.info("Opening /dev/gpiochip%d", GPIO_CHIP)
-
-    gpio = lgpio.gpiochip_open(GPIO_CHIP)
-
-    lgpio.gpio_claim_output(
-        gpio,
-        RPWM_PIN,
-        0
-    )
-
-    lgpio.gpio_claim_output(
-        gpio,
-        LPWM_PIN,
-        0
-    )
-
-    # Explicitly make sure both outputs start LOW
-    lgpio.gpio_write(
-        gpio,
-        RPWM_PIN,
-        0
-    )
-
-    lgpio.gpio_write(
-        gpio,
-        LPWM_PIN,
-        0
-    )
-
-    log.info(
-        "GPIO ready: RPWM=GPIO%d LPWM=GPIO%d",
-        RPWM_PIN,
-        LPWM_PIN
-    )
-
-
-def stop_pwm(pin):
-    """
-    Stop output on one direction.
-
-    Important:
-    This uses a VALID PWM frequency with 0% duty cycle.
-
-    Do NOT use:
-        lgpio.tx_pwm(..., 0, 0)
-
-    because the lgpio version on this machine rejects a
-    zero frequency with 'bad PWM micros'.
-    """
-
-    lgpio.tx_pwm(
-        gpio,
-        pin,
-        PWM_FREQUENCY,
-        0
-    )
-
-    # Explicitly hold the pin LOW
-    lgpio.gpio_write(
-        gpio,
-        pin,
-        0
-    )
-
-
-def all_off():
-    """
-    Turn both sides of the H-bridge OFF.
-    """
-
-    stop_pwm(RPWM_PIN)
-    stop_pwm(LPWM_PIN)
-
-
-def emergency_off():
-    """
-    Best-effort shutdown.
-
-    Used during exceptions and cleanup.
-    """
-
-    global current_direction
-
-    if gpio is None:
-        return
-
-    try:
-        all_off()
-    except Exception:
+    @staticmethod
+    def _lgpio():
         try:
-            lgpio.gpio_write(
-                gpio,
-                RPWM_PIN,
-                0
-            )
-        except Exception:
-            pass
+            import lgpio
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "lgpio is required on the Raspberry Pi running peltier.py. "
+                "Install the Raspberry Pi lgpio package before starting this client."
+            ) from exc
+        return lgpio
+    
+    def _configure_mqtt(self):
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
 
-        try:
-            lgpio.gpio_write(
-                gpio,
-                LPWM_PIN,
-                0
-            )
-        except Exception:
-            pass
-
-    current_direction = 0
-
-
-# ============================================================
-# PELTIER CONTROL
-# ============================================================
-
-def set_peltier(command):
-    """
-    Set Peltier power.
-
-      +100 = full power in positive direction
-       +50 = 50% positive direction
-         0 = OFF
-       -50 = 50% negative direction
-      -100 = full power in negative direction
-
-    Only ONE PWM input is active at a time.
-    """
-
-    global current_direction
-
-    command = float(command)
-
-    if not math.isfinite(command):
-        raise ValueError("Command must be a finite number")
-
-    if command < -100 or command > 100:
-        raise ValueError(
-            f"Command must be between -100 and 100; got {command}"
+    
+    def setup_gpio(self):
+        """
+        Open /dev/gpiochip0 and claim the two PWM GPIOs. 
+        Both outputs start LOW.
+        """
+        lgpio = self._lpgio()
+        log.info("Opening /dev/gpiochip%d", config.PELTIER_GPIO_CHIP)
+        self.gpio = lgpio.gpiochip_open(config.PELTIER_GPIO_CHIP)
+        lgpio.gpio_claim_output(self.gpio, config.PELTIER_RPWM_PIN, 0)
+        lgpio.gpio_claim_output(self.gpio, config.PELTIER_LPWM_PIN, 0)
+        lgpio.gpio_write(self.gpio, config.PELTIER_RPWM_PIN, 0)
+        lgpio.gpio_write(self.gpio, config.PELTIER_LPWM_PIN, 0)
+        
+        log.info(
+            "GPIO ready: RPWM=GPIO%d LPWM=GPIO%d",
+            config.PELTIER_RPWM_PIN,
+            config.PELTIER_LPWM_PIN,
         )
 
-    # Deadband around zero
-    if abs(command) < DEADBAND:
-        command = 0.0
+    
+    def _stop_pwm(self, pin):
+        """
+        Stop output on one direction.
 
-    if command > 0:
-        new_direction = 1
+        Important:
+        This uses a VALID PWM frequency with 0% duty cycle.
 
-    elif command < 0:
-        new_direction = -1
+        Do NOT use:
+            lgpio.tx_pwm(..., 0, 0)
 
-    else:
-        new_direction = 0
+        because the lgpio version on this machine rejects a
+        zero frequency with 'bad PWM micros'.
+        """
 
-    duty = abs(command)
+        lgpio = self._lgpio()
 
-    with lock:
+        lgpio.tx_pwm(
+            self.gpio,
+            pin,
+            config.PELTIER_PWM_FREQUENCY_HZ,
+            0
+        )
 
-        # ----------------------------------------------------
-        # OFF
-        # ----------------------------------------------------
+        # Explicitly hold the pin LOW
+        lgpio.gpio_write(
+            self.gpio,
+            pin,
+            0
+        )
 
-        if new_direction == 0:
 
-            all_off()
+    def _all_off(self):
+        """
+        Turn both sides of the H-bridge OFF.
+        """
+        self._stop_pwm(config.PELTEIR_RPWM_PIN)
+        self._stop_pwm(config.PELTIER_LPWM_PIN)
+        self.current_direction = 0
+        self.applied_power = 0.0
 
-            current_direction = 0
+    
+    def emergency_off(self, reason=None):
+        """
+        Best-effort shutdown.
 
-            log.info("Peltier OFF")
+        Used during exceptions and cleanup.
+        """
+        with self.lock:
+            if self.gpio is None:
+                self.current_direction = 0
+                self.applied_power = 0.0
+                return
+            try:
+                self._all_off()
+            except Exception:
+                lgpio = self._lgpio()
+                for pin in (config.PELTIER_RPWM_PIN, config.PELTIER_LPWM_PIN):
+                    try:
+                        lgpio.gpio_write(self.gpio, pin, 0)
+                    except Exception:
+                        pass
+                self.current_direction = 0
+                self.applied_power = 0.0
+            if reason:
+                log.warning("Peltier forced OFF: %s", reason)
 
-            return
 
-        # ----------------------------------------------------
-        # DIRECTION CHANGE
-        # ----------------------------------------------------
 
-        if (
-            current_direction != 0
-            and new_direction != current_direction
-        ):
+    
+    def cleanup_gpio(self):
+        with self.lock:
+            if self.gpio is None:
+                return
+            lgpio = self._lgpio()
+            self.emergency_off("client shutdown")
+            for pin in (config.PELTIER_RPWM_PIN, config.PELTIER_LPWM_PIN):
+                try:
+                    lgpio.gpio_free(self.gpio, pin)
+                except Exception:
+                    pass
+            try:
+                lgpio.gpio_close(self.gpio)
+            except Exception:
+                pass
+            self.gpio = None
 
-            log.info(
-                "Direction change: bridge OFF for %.0f ms",
-                DIRECTION_CHANGE_DELAY * 1000
-            )
 
-            all_off()
+    def set_power(self, command):
+        command = float(command)
+        if not math.isfinite(command):
+            raise ValueError("Peltier command must be finite")
+        if command < -100 or command > 100:
+            raise ValueError(f"Peltier command must be between -100 and 100; got {command}")
+        if abs(command) < config.PELTIER_DEADBAND_PERCENT:
+            command = 0.0
 
-            current_direction = 0
+        with self.lock:
+            self.requested_power = command
+            if self.safety_latched and command != 0:
+                self._all_off()
+                self.last_error = "Command ignored because the software safety latch is active."
+                self.publish_state()
+                return
 
-            time.sleep(
-                DIRECTION_CHANGE_DELAY
-            )
+            new_direction = 1 if command > 0 else (-1 if command < 0 else 0)
+            duty = abs(command)
 
-        # ----------------------------------------------------
-        # POSITIVE DIRECTION
-        # ----------------------------------------------------
+            if new_direction == 0:
+                # Zero power turns both bridge outputs off.
+                self._all_off()
+                self.last_error = None
+                log.info("Peltier OFF")
+                self.publish_state()
+                return
 
-        if new_direction > 0:
+            if self.current_direction != 0 and new_direction != self.current_direction:
+                # Pause with both outputs off before reversing current.
+                self._all_off()
+                time.sleep(config.PELTIER_DIRECTION_CHANGE_DELAY_S)
 
-            # Opposite side MUST be off first
-            stop_pwm(LPWM_PIN)
+            lgpio = self._lgpio()
+            if new_direction > 0:
+                # Positive power drives RPWM; keep LPWM off.
+                self._stop_pwm(config.PELTIER_LPWM_PIN)
+                lgpio.tx_pwm(
+                    self.gpio,
+                    config.PELTIER_RPWM_PIN,
+                    config.PELTIER_PWM_FREQUENCY_HZ,
+                    duty,
+                )
+            else:
+                # Negative power drives LPWM; keep RPWM off.
+                self._stop_pwm(config.PELTIER_RPWM_PIN)
+                lgpio.tx_pwm(
+                    self.gpio,
+                    config.PELTIER_LPWM_PIN,
+                    config.PELTIER_PWM_FREQUENCY_HZ,
+                    duty,
+                )
 
-            lgpio.tx_pwm(
-                gpio,
-                RPWM_PIN,
-                PWM_FREQUENCY,
-                duty
-            )
+            self.current_direction = new_direction
+            self.applied_power = command
+            self.last_error = None
+            log.info("Peltier applied %.1f%%", command)
+            self.publish_state()
 
-            current_direction = 1
-
-            log.info(
-                "Peltier + direction: %.1f%%",
-                duty
-            )
-
-        # ----------------------------------------------------
-        # NEGATIVE DIRECTION
-        # ----------------------------------------------------
-
+    
+    def state_payload(self):
+        if self.current_direction > 0:
+            direction = "POSITIVE"
+        elif self.current_direction < 0:
+            direction = "NEGATIVE"
         else:
+            direction = "OFF"
+        return {
+            "requested_power": round(self.requested_power, 2),
+            "applied_power": round(self.applied_power, 2),
+            "direction": direction,
+            "safety_latched": self.safety_latched,
+            "watchdog_timed_out": self.watchdog_timed_out,
+            "last_error": self.last_error,
+        }
+    
 
-            # Opposite side MUST be off first
-            stop_pwm(RPWM_PIN)
-
-            lgpio.tx_pwm(
-                gpio,
-                LPWM_PIN,
-                PWM_FREQUENCY,
-                duty
-            )
-
-            current_direction = -1
-
-            log.info(
-                "Peltier - direction: %.1f%%",
-                duty
-            )
+    def publish_state(self):
+        send(self.client, config.TOPIC_PELTIER_STATE, self.state_payload(), retain=True)
 
 
-# ============================================================
-# MQTT CALLBACKS
-# ============================================================
-
-def on_connect(
-    client,
-    userdata,
-    flags,
-    reason_code,
-    properties=None
-):
-
-    if reason_code == 0:
-
-        log.info(
-            "Connected to MQTT broker %s:%d",
-            MQTT_BROKER,
-            MQTT_PORT
-        )
-
-        client.subscribe(
-            MQTT_TOPIC
-        )
-
-        log.info(
-            "Subscribed to MQTT topic: %s",
-            MQTT_TOPIC
-        )
-
-    else:
-
-        log.error(
-            "MQTT connection failed: %s",
-            reason_code
-        )
 
 
-def on_disconnect(
-    client,
-    userdata,
-    disconnect_flags,
-    reason_code,
-    properties=None
-):
-
-    log.warning(
-        "MQTT disconnected: %s",
-        reason_code
-    )
-
-    # Immediately shut the Peltier off if MQTT disappears
-    with lock:
-        emergency_off()
+    def _on_connect(self, client, userdata, flags, reason_code, *extra):
+        if connected_ok(reason_code):
+            client.subscribe(config.TOPIC_PELTIER_CMD, qos=1)
+            client.subscribe(config.TOPIC_PELTIER_SAFETY_CMD, qos=1)
+            log.info("Connected to MQTT broker and subscribed to Peltier commands")
+            self.publish_state()
+        else:
+            log.error("MQTT connection failed: %s", reason_code)
 
 
-def on_message(
-    client,
-    userdata,
-    message
-):
 
-    global last_command_time
-    global timed_out
+    def _on_disconnect(self, *args):
+        self.emergency_off("MQTT disconnected")
 
-    try:
 
-        payload = (
-            message.payload
-            .decode("utf-8")
-            .strip()
-        )
 
-        value = float(payload)
-
-        if not math.isfinite(value):
-
-            log.warning(
-                "Ignoring invalid MQTT value: %r",
-                payload
-            )
-
+    def _on_message(self, client, userdata, message):
+        data = read_json(message)
+        if not isinstance(data, dict):
+            log.warning("Ignoring non-JSON MQTT payload on %s", message.topic)
             return
 
-        if value < -100 or value > 100:
+        try:
+            if message.topic == config.TOPIC_PELTIER_CMD:
+                value = float(data["power"])
+                if not math.isfinite(value) or value < -100 or value > 100:
+                    raise ValueError("power must be a finite value from -100 to 100")
+                self.last_command_time = self.clock()
+                self.watchdog_timed_out = False
+                self.set_power(value)
 
-            log.warning(
-                "Ignoring out-of-range MQTT command: %s",
-                payload
-            )
+            elif message.topic == config.TOPIC_PELTIER_SAFETY_CMD:
+                action = data.get("action")
+                if action == "TRIP":
+                    with self.lock:
+                        self.safety_latched = True
+                        self.emergency_off("software safety trip")
+                        self.publish_state()
+                elif action == "RESET":
+                    with self.lock:
+                        self.safety_latched = False
+                        self.watchdog_timed_out = False
+                        self.last_error = None
+                        self.publish_state()
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("Invalid Peltier MQTT command %r: %s", data, exc)
+        except Exception as exc:
+            self.last_error = str(exc)
+            log.exception("Error applying Peltier command")
+            self.emergency_off("command error")
+            self.publish_state()
 
-            return
+    # ------------------------------------------------------------------ Watchdog
+    def watchdog_step(self):
+        with self.lock:
+            if self.last_command_time is None or self.safety_latched:
+                return False
+            age = self.clock() - self.last_command_time
+            if age <= config.PELTIER_COMMAND_TIMEOUT_S:
+                return False
+            if not self.watchdog_timed_out:
+                self.watchdog_timed_out = True
+                self.safety_latched = True
+                self.emergency_off(
+                    f"no controller command for {age:.1f} s; software safety latch set"
+                )
+                self.publish_state()
+                return True
+            return False
 
-        # Only update watchdog after receiving a valid command
-        last_command_time = time.monotonic()
+    def _watchdog_loop(self):
+        while True:
+            time.sleep(0.5)
+            self.watchdog_step()
 
-        timed_out = False
+    def run(self):
+        self.setup_gpio()
+        connect_and_start(self.client, "peltier-hardware")
+        thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="peltier-watchdog")
+        thread.start()
+        log.info("Peltier hardware client running; command range -100 to +100%%")
+        try:
+            while True:
+                time.sleep(1)
+        finally:
+            try:
+                self.client.disconnect()
+                self.client.loop_stop()
+            finally:
+                self.cleanup_gpio()
 
-        log.info(
-            "MQTT command received: %.1f",
-            value
-        )
-
-        set_peltier(
-            value
-        )
-
-    except UnicodeDecodeError:
-
-        log.warning(
-            "MQTT payload was not valid UTF-8: %r",
-            message.payload
-        )
-
-    except ValueError as exc:
-
-        log.warning(
-            "Invalid MQTT payload %r: %s",
-            message.payload,
-            exc
-        )
-
-    except Exception:
-
-        log.exception(
-            "Error processing MQTT message"
-        )
-
-        with lock:
-            emergency_off()
-
-
-# ============================================================
-# WATCHDOG
-# ============================================================
-
-def watchdog():
-
-    global timed_out
-    global current_direction
-
-    while True:
-
-        time.sleep(0.5)
-
-        # Haven't received our first command yet
-        if last_command_time == 0:
-            continue
-
-        age = (
-            time.monotonic()
-            - last_command_time
-        )
-
-        if (
-            age > MQTT_TIMEOUT
-            and not timed_out
-        ):
-
-            with lock:
-
-                all_off()
-
-                current_direction = 0
-
-            timed_out = True
-
-            log.warning(
-                "No MQTT command for %.1f seconds - Peltier OFF",
-                age
-            )
-
-
-# ============================================================
-# MQTT SETUP
-# ============================================================
-
-def create_mqtt_client():
-
-    # Current Paho MQTT versions
-    try:
-
-        client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2
-        )
-
-        client.on_disconnect = on_disconnect
-
-    # Fallback for an older Paho version
-    except AttributeError:
-
-        client = mqtt.Client()
-
-    client.on_connect = on_connect
-    client.on_message = on_message
-
-    if MQTT_USERNAME is not None:
-
-        client.username_pw_set(
-            MQTT_USERNAME,
-            MQTT_PASSWORD
-        )
-
-    return client
-
-
-# ============================================================
-# CLEANUP
-# ============================================================
-
-def cleanup_gpio():
-
-    global gpio
-
-    if gpio is None:
-        return
-
-    log.info(
-        "Turning H-bridge OFF"
-    )
-
-    emergency_off()
-
-    try:
-
-        lgpio.gpio_free(
-            gpio,
-            RPWM_PIN
-        )
-
-    except Exception:
-        pass
-
-    try:
-
-        lgpio.gpio_free(
-            gpio,
-            LPWM_PIN
-        )
-
-    except Exception:
-        pass
-
-    try:
-
-        lgpio.gpiochip_close(
-            gpio
-        )
-
-    except Exception:
-        pass
-
-    gpio = None
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
-
-    setup_gpio()
-
-    # Outputs were claimed LOW in setup_gpio().
-    # There is deliberately no tx_pwm(..., 0, 0) here.
-
-    log.info(
-        "Starting Peltier MQTT controller"
+    """Start the Raspberry Pi Peltier hardware client."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
     )
+    client = PeltierHardwareClient()
+    client.run()
 
-    log.info(
-        "Control range: -100 to +100"
-    )
-
-    log.info(
-        "PWM frequency: %d Hz",
-        PWM_FREQUENCY
-    )
-
-    log.info(
-        "MQTT watchdog timeout: %.1f seconds",
-        MQTT_TIMEOUT
-    )
-
-    watchdog_thread = threading.Thread(
-        target=watchdog,
-        daemon=True,
-        name="peltier-watchdog"
-    )
-
-    watchdog_thread.start()
-
-    client = create_mqtt_client()
-
-    log.info(
-        "Connecting to MQTT broker %s:%d",
-        MQTT_BROKER,
-        MQTT_PORT
-    )
-
-    client.connect(
-        MQTT_BROKER,
-        MQTT_PORT,
-        keepalive=60
-    )
-
-    try:
-
-        client.loop_forever()
-
-    finally:
-
-        try:
-            client.disconnect()
-        except Exception:
-            pass
-
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
-
     try:
-
         main()
-
     except KeyboardInterrupt:
-
-        log.info(
-            "Stopped by user"
-        )
-
+        log.info("Stopped by user")
     except Exception:
-
-        log.exception(
-            "Fatal error"
-        )
-
-    finally:
-
-        cleanup_gpio()
+        log.exception("Fatal error")

@@ -1,897 +1,309 @@
 #!/usr/bin/env python3
 
-import json
 import logging
-import math
 import statistics
 import time
 
-import lgpio
-import paho.mqtt.client as mqtt
+import config
+from mqtt_common import connect_and_start, make_client, send
 
+log = logging.getLogger("pressure-hardware")
 
-# ============================================================
-# MQTT CONFIGURATION
-# ============================================================
 
-MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
+class PressureHardwareClient:
+    def __init__(self):
+        self.client = make_client("biodigester-pressure-hardware")
+        self.gpio = None
+        self.bubble_active = False
+        self.bubble_count = 0
 
-MQTT_TOPIC_RAW = "digester/pressure_raw"
-MQTT_TOPIC_DROP = "digester/pressure_drop"
-MQTT_TOPIC_THRESHOLD = "digester/pressure_threshold"
-
-MQTT_TOPIC_BUBBLE = "bubble"
-MQTT_TOPIC_BUBBLE_EVENT = "bubble/event"
-
-# Don't publish all 40 samples/sec over MQTT.
-# Detection still happens at the full sensor rate.
-MQTT_TELEMETRY_INTERVAL = 0.2       # 5 Hz
-
-
-# ============================================================
-# GPIO
-# ============================================================
-
-GPIO_CHIP = 0
-
-# BCM numbering
-SCK_PIN = 23
-OUT_PIN = 24
-
-
-# ============================================================
-# HX710B
-# ============================================================
-
-READ_TIMEOUT = 1.0
-
-# 27 clocks selects differential-input 40 Hz mode
-EXTRA_CLOCKS = 3
-
-
-# ============================================================
-# BUBBLE DETECTION CONFIGURATION
-# ============================================================
-
-# Number of samples used to learn initial baseline.
-#
-# 80 samples @ 40 Hz = approximately 2 seconds.
-WARMUP_SAMPLES = 80
-
-
-# ------------------------------------------------------------
-# DIRECTION
-# ------------------------------------------------------------
-#
-# Normally pressure falling causes the raw ADC value to fall:
-#
-#     True:
-#       baseline = 1,000,000
-#       reading  =   900,000
-#       drop     =   100,000
-#
-# If your sensor behaves backwards, change this to False.
-
-DROP_WHEN_RAW_DECREASES = True
-
-
-# ------------------------------------------------------------
-# MINIMUM DROP
-# ------------------------------------------------------------
-#
-# Absolute minimum change in raw ADC counts before it can
-# possibly be considered a bubble.
-#
-# You'll probably want to tune this after watching the output.
-
-MIN_DROP_COUNTS = 10000
-
-
-# ------------------------------------------------------------
-# NOISE REJECTION
-# ------------------------------------------------------------
-#
-# The script also learns normal sensor noise.
-#
-# Detection threshold becomes:
-#
-# max(
-#     MIN_DROP_COUNTS,
-#     noise * NOISE_MULTIPLIER
-# )
-
-NOISE_MULTIPLIER = 6.0
-
-
-# ------------------------------------------------------------
-# HOLD TIME
-# ------------------------------------------------------------
-#
-# Pressure must remain below the threshold for this long before
-# a bubble is declared.
-#
-# At 40 Hz:
-#
-# 0.075 sec ~= 3 samples
-# 0.100 sec ~= 4 samples
-# 0.150 sec ~= 6 samples
-# 0.250 sec ~= 10 samples
-
-DROP_HOLD_SECONDS = 0.150
-
-
-# ------------------------------------------------------------
-# CLEARING THE EVENT
-# ------------------------------------------------------------
-#
-# Bubble stays active until pressure returns close to normal.
-
-RELEASE_THRESHOLD_RATIO = 0.40
-
-# Must remain recovered for this long before bubble becomes 0.
-CLEAR_HOLD_SECONDS = 0.250
-
-
-# ------------------------------------------------------------
-# BASELINE TRACKING
-# ------------------------------------------------------------
-#
-# Slow adaptation allows gradual pressure changes without
-# interpreting them as bubbles.
-#
-# Smaller = slower.
-
-BASELINE_ALPHA = 0.002
-
-# Noise estimate update speed
-NOISE_ALPHA = 0.01
-
-
-# ============================================================
-# OPTIONAL CALIBRATION
-# ============================================================
-#
-# Bubble detection DOES NOT need calibration.
-#
-# Leave these None unless you also want to publish kPa.
-
-ZERO_RAW = 1339145
-CAL_RAW = None
-CAL_KPA = None
-
-MQTT_TOPIC_KPA = "digester/pressure"
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
-
-log = logging.getLogger("pressure")
-
-
-# ============================================================
-# GLOBALS
-# ============================================================
-
-gpio = None
-
-bubble_active = False
-bubble_count = 0
-
-
-# ============================================================
-# GPIO SETUP
-# ============================================================
-
-def setup_gpio():
-
-    global gpio
-
-    log.info(
-        "Opening /dev/gpiochip%d",
-        GPIO_CHIP
-    )
-
-    gpio = lgpio.gpiochip_open(
-        GPIO_CHIP
-    )
-
-    lgpio.gpio_claim_output(
-        gpio,
-        SCK_PIN,
-        0
-    )
-
-    lgpio.gpio_claim_input(
-        gpio,
-        OUT_PIN
-    )
-
-    lgpio.gpio_write(
-        gpio,
-        SCK_PIN,
-        0
-    )
-
-    log.info(
-        "HX710B GPIO ready: SCK=GPIO%d OUT=GPIO%d",
-        SCK_PIN,
-        OUT_PIN
-    )
-
-
-# ============================================================
-# HX710B
-# ============================================================
-
-def wait_ready():
-
-    deadline = (
-        time.monotonic()
-        + READ_TIMEOUT
-    )
-
-    # DOUT goes LOW when a conversion is ready.
-    while lgpio.gpio_read(
-        gpio,
-        OUT_PIN
-    ):
-
-        if time.monotonic() >= deadline:
-
-            raise TimeoutError(
-                "HX710B did not become ready"
-            )
-
-        time.sleep(0.00025)
-
-
-def clock_high():
-
-    lgpio.gpio_write(
-        gpio,
-        SCK_PIN,
-        1
-    )
-
-
-def clock_low():
-
-    lgpio.gpio_write(
-        gpio,
-        SCK_PIN,
-        0
-    )
-
-
-def read_raw():
-    """
-    Read one 24-bit signed HX710B conversion.
-
-    24 clocks:
-        retrieve ADC value
-
-    +3 additional clocks:
-        total = 27 clocks
-
-    27 clocks tells HX710B:
-        next conversion = differential pressure input
-        data rate = 40 Hz
-    """
-
-    clock_low()
-
-    wait_ready()
-
-    value = 0
-
-    # Read 24 data bits MSB first.
-    #
-    # Do not insert sleeps while SCK is HIGH.
-    for _ in range(24):
-
-        clock_high()
-
-        bit = lgpio.gpio_read(
-            gpio,
-            OUT_PIN
-        )
-
-        value = (
-            (value << 1)
-            | bit
-        )
-
-        clock_low()
-
-    # We've already sent 24 pulses.
-    #
-    # Send 3 additional pulses:
-    #
-    # 25
-    # 26
-    # 27
-    #
-    # selecting differential input @ 40 Hz.
-
-    for _ in range(EXTRA_CLOCKS):
-
-        clock_high()
-        clock_low()
-
-    # Convert 24-bit two's-complement number
-    # into a normal Python signed integer.
-
-    if value & 0x800000:
-        value -= 1 << 24
-
-    return value
-
-
-# ============================================================
-# PRESSURE CALIBRATION
-# ============================================================
-
-def calibration_enabled():
-
-    return (
-        ZERO_RAW is not None
-        and CAL_RAW is not None
-        and CAL_KPA is not None
-        and CAL_RAW != ZERO_RAW
-    )
-
-
-def raw_to_kpa(raw):
-
-    scale = (
-        CAL_KPA
-        / (CAL_RAW - ZERO_RAW)
-    )
-
-    return (
-        raw - ZERO_RAW
-    ) * scale
-
-
-# ============================================================
-# MQTT
-# ============================================================
-
-def create_mqtt_client():
-
-    try:
-
-        client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2
-        )
-
-    except AttributeError:
-
-        client = mqtt.Client()
-
-    return client
-
-
-# ============================================================
-# DROP CALCULATION
-# ============================================================
-
-def calculate_drop(
-    baseline,
-    raw
-):
-
-    if DROP_WHEN_RAW_DECREASES:
-
-        return (
-            baseline - raw
-        )
-
-    else:
-
-        return (
-            raw - baseline
-        )
-
-
-# ============================================================
-# CLEANUP
-# ============================================================
-
-def cleanup_gpio():
-
-    global gpio
-
-    if gpio is None:
-        return
-
-    try:
-        clock_low()
-    except Exception:
-        pass
-
-    try:
-        lgpio.gpio_free(
-            gpio,
-            SCK_PIN
-        )
-    except Exception:
-        pass
-
-    try:
-        lgpio.gpio_free(
-            gpio,
-            OUT_PIN
-        )
-    except Exception:
-        pass
-
-    try:
-        lgpio.gpiochip_close(
-            gpio
-        )
-    except Exception:
-        pass
-
-    gpio = None
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    global bubble_active
-    global bubble_count
-
-    setup_gpio()
-
-    client = create_mqtt_client()
-
-    log.info(
-        "Connecting to MQTT broker %s:%d",
-        MQTT_BROKER,
-        MQTT_PORT
-    )
-
-    client.connect(
-        MQTT_BROKER,
-        MQTT_PORT,
-        keepalive=60
-    )
-
-    client.loop_start()
-
-    # --------------------------------------------------------
-    # Tell HX710B to enter 40 Hz mode
-    # --------------------------------------------------------
-    #
-    # On power-up the first conversion may still be 10 Hz.
-    # read_raw() sends 27 clocks, causing subsequent
-    # conversions to run at 40 Hz.
-
-    log.info(
-        "Starting HX710B in 40 Hz differential mode"
-    )
-
-    first_reading = read_raw()
-
-    log.info(
-        "First raw reading: %d",
-        first_reading
-    )
-
-    # --------------------------------------------------------
-    # BASELINE WARMUP
-    # --------------------------------------------------------
-
-    log.info(
-        "Learning pressure baseline for %d samples...",
-        WARMUP_SAMPLES
-    )
-
-    warmup = []
-
-    while len(warmup) < WARMUP_SAMPLES:
-
+    @staticmethod
+    def _lgpio():
         try:
+            import lgpio
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "lgpio is required on the Raspberry Pi running pressure.py. "
+                "Install the Raspberry Pi lgpio package before starting this client."
+            ) from exc
+        return lgpio
 
-            raw = read_raw()
-
-            warmup.append(
-                raw
-            )
-
-        except TimeoutError as exc:
-
-            log.warning(
-                "%s",
-                exc
-            )
-
-    baseline = float(
-        statistics.median(
-            warmup
+    def setup_gpio(self):
+        log.info("Opening /dev/gpiochip%d", config.PRESSURE_GPIO_CHIP)
+        self.gpio = self._lgpio().gpiochip_open(config.PRESSURE_GPIO_CHIP)
+        self._lgpio().gpio_claim_output(self.gpio, config.PRESSURE_SCK_PIN, 0)
+        self._lgpio().gpio_claim_input(self.gpio, config.PRESSURE_OUT_PIN)
+        self._lgpio().gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 0)
+        log.info(
+            "HX710B GPIO ready: SCK=GPIO%d OUT=GPIO%d",
+            config.PRESSURE_SCK_PIN,
+            config.PRESSURE_OUT_PIN,
         )
-    )
 
-    noise = float(
-        statistics.pstdev(
-            warmup
+    def wait_ready(self):
+        deadline = time.monotonic() + config.PRESSURE_READ_TIMEOUT
+        while self._lgpio().gpio_read(self.gpio, config.PRESSURE_OUT_PIN):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("HX710B did not become ready")
+            time.sleep(0.00025)
+
+    def clock_high(self):
+        self._lgpio().gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 1)
+
+    def clock_low(self):
+        self._lgpio().gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 0)
+
+    def read_raw(self):
+        """
+        Read one 24-bit signed HX710B conversion.
+
+        24 clocks:
+            retrieve ADC value
+
+        +3 additional clocks:
+            total = 27 clocks
+
+        27 clocks tells HX710B:
+            next conversion = differential pressure input
+            data rate = 40 Hz
+        """
+        lgpio = self._lgpio()
+        self.clock_low()
+        self.wait_ready()
+        value = 0
+        # Read MSB first without sleeping while SCK is high.
+        for _ in range(24):
+            lgpio.gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 1)
+            bit = lgpio.gpio_read(self.gpio, config.PRESSURE_OUT_PIN)
+            value = value << 1 | bit
+            lgpio.gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 0)
+        for _ in range(config.PRESSURE_EXTRA_CLOCKS):
+            lgpio.gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 1)
+            lgpio.gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 0)
+        # Interpret the ADC's 24-bit two's-complement value.
+        if value & 0x800000:
+            value -= 1 << 24
+        return value
+
+    def calibration_enabled(self):
+        return (
+            config.PRESSURE_ZERO_RAW is not None
+            and config.PRESSURE_CAL_RAW is not None
+            and (config.PRESSURE_CAL_KPA is not None)
+            and (config.PRESSURE_CAL_RAW != config.PRESSURE_ZERO_RAW)
         )
-    )
 
-    # Prevent zero noise from making the adaptive
-    # threshold meaningless.
+    def raw_to_kpa(self, raw):
+        scale = config.PRESSURE_CAL_KPA / (
+            config.PRESSURE_CAL_RAW - config.PRESSURE_ZERO_RAW
+        )
+        return (raw - config.PRESSURE_ZERO_RAW) * scale
 
-    noise = max(
-        noise,
-        1.0
-    )
+    def calculate_drop(self, baseline, raw):
+        if config.PRESSURE_DROP_WHEN_RAW_DECREASES:
+            return baseline - raw
+        else:
+            return raw - baseline
 
-    log.info(
-        "Baseline learned: %.1f",
-        baseline
-    )
+    def cleanup_gpio(self):
+        if self.gpio is None:
+            return
+        try:
+            self.clock_low()
+        except Exception:
+            pass
+        try:
+            self._lgpio().gpio_free(self.gpio, config.PRESSURE_SCK_PIN)
+        except Exception:
+            pass
+        try:
+            self._lgpio().gpio_free(self.gpio, config.PRESSURE_OUT_PIN)
+        except Exception:
+            pass
+        try:
+            self._lgpio().gpiochip_close(self.gpio)
+        except Exception:
+            pass
+        self.gpio = None
 
-    log.info(
-        "Initial noise: %.1f counts",
-        noise
-    )
-
-    log.info(
-        "Minimum drop threshold: %d counts",
-        MIN_DROP_COUNTS
-    )
-
-    log.info(
-        "Drop hold time: %.3f sec",
-        DROP_HOLD_SECONDS
-    )
-
-    # Publish initial state
-
-    client.publish(
-        MQTT_TOPIC_BUBBLE,
-        "0",
-        retain=True
-    )
-
-    candidate_start = None
-    clear_start = None
-
-    last_telemetry = 0
-    last_log = 0
-
-    try:
-
-        while True:
-
+    def _read_loop(self):
+        # The first read selects 40 Hz mode for subsequent conversions.
+        log.info("Starting HX710B in 40 Hz differential mode")
+        first_reading = self.read_raw()
+        log.info("First raw reading: %d", first_reading)
+        log.info(
+            "Learning pressure baseline for %d samples...",
+            config.PRESSURE_WARMUP_SAMPLES,
+        )
+        warmup = []
+        while len(warmup) < config.PRESSURE_WARMUP_SAMPLES:
             try:
-
-                # ============================================
-                # GET NEXT 40 Hz SAMPLE
-                # ============================================
-
-                raw = read_raw()
-
+                raw = self.read_raw()
+                warmup.append(raw)
+            except TimeoutError as exc:
+                log.warning("%s", exc)
+        baseline = float(statistics.median(warmup))
+        noise = float(statistics.pstdev(warmup))
+        noise = max(noise, 1.0)
+        log.info("Baseline learned: %.1f", baseline)
+        log.info("Initial noise: %.1f counts", noise)
+        log.info("Minimum drop threshold: %d counts", config.PRESSURE_MIN_DROP_COUNTS)
+        log.info("Drop hold time: %.3f sec", config.PRESSURE_DROP_HOLD_SECONDS)
+        send(self.client, config.TOPIC_BUBBLE, {"bubble": 0}, retain=True)
+        candidate_start = None
+        clear_start = None
+        last_telemetry = 0
+        last_log = 0
+        while True:
+            try:
+                raw = self.read_raw()
                 now = time.monotonic()
-
-
-                # ============================================
-                # DETECTION THRESHOLD
-                # ============================================
-
-                adaptive_threshold = (
-                    noise
-                    * NOISE_MULTIPLIER
-                )
-
+                adaptive_threshold = noise * config.PRESSURE_NOISE_MULTIPLIER
                 threshold = max(
-                    float(MIN_DROP_COUNTS),
-                    adaptive_threshold
+                    float(config.PRESSURE_MIN_DROP_COUNTS), adaptive_threshold
                 )
-
-
-                # ============================================
-                # PRESSURE DROP
-                # ============================================
-
-                drop = calculate_drop(
-                    baseline,
-                    raw
-                )
-
-
-                # ============================================
-                # NOT CURRENTLY IN A BUBBLE
-                # ============================================
-
-                if not bubble_active:
-
+                drop = self.calculate_drop(baseline, raw)
+                if not self.bubble_active:
                     if drop >= threshold:
-
-                        # Pressure has crossed the threshold.
-
                         if candidate_start is None:
-
                             candidate_start = now
-
-                        held_for = (
-                            now
-                            - candidate_start
-                        )
-
-                        if held_for >= DROP_HOLD_SECONDS:
-
-                            bubble_active = True
-
-                            bubble_count += 1
-
+                        held_for = now - candidate_start
+                        if held_for >= config.PRESSURE_DROP_HOLD_SECONDS:
+                            self.bubble_active = True
+                            self.bubble_count += 1
                             clear_start = None
-
                             log.warning(
-                                "BUBBLE DETECTED #%d "
-                                "drop=%.0f "
-                                "threshold=%.0f "
-                                "raw=%d "
-                                "baseline=%.0f "
-                                "held=%.3fs",
-                                bubble_count,
+                                "BUBBLE DETECTED #%d drop=%.0f threshold=%.0f raw=%d baseline=%.0f held=%.3fs",
+                                self.bubble_count,
                                 drop,
                                 threshold,
                                 raw,
                                 baseline,
-                                held_for
+                                held_for,
                             )
-
-                            client.publish(
-                                MQTT_TOPIC_BUBBLE,
-                                "1",
-                                retain=True
+                            send(
+                                self.client,
+                                config.TOPIC_BUBBLE,
+                                {"bubble": 1},
+                                retain=True,
                             )
-
                             event = {
                                 "event": "bubble",
-                                "count": bubble_count,
+                                "count": self.bubble_count,
                                 "raw": raw,
-                                "baseline": round(
-                                    baseline
-                                ),
-                                "drop": round(
-                                    drop
-                                ),
-                                "threshold": round(
-                                    threshold
-                                ),
-                                "hold_seconds": round(
-                                    held_for,
-                                    3
-                                )
+                                "baseline": round(baseline),
+                                "drop": round(drop),
+                                "threshold": round(threshold),
+                                "hold_seconds": round(held_for, 3),
                             }
-
-                            client.publish(
-                                MQTT_TOPIC_BUBBLE_EVENT,
-                                json.dumps(
-                                    event
-                                ),
-                                retain=False
+                            send(
+                                self.client,
+                                config.TOPIC_BUBBLE_EVENT,
+                                event,
+                                retain=False,
                             )
-
                     else:
-
-                        # Drop disappeared before hold time
                         candidate_start = None
-
-
-                        # ------------------------------------
-                        # BASELINE TRACKING
-                        # ------------------------------------
-                        #
-                        # Only update baseline while we're in
-                        # normal conditions.
-
-                        error = (
-                            raw - baseline
-                        )
-
-                        baseline += (
-                            BASELINE_ALPHA
-                            * error
-                        )
-
-
-                        # ------------------------------------
-                        # NOISE TRACKING
-                        # ------------------------------------
-
-                        deviation = abs(
-                            raw - baseline
-                        )
-
-                        noise += (
-                            NOISE_ALPHA
-                            * (
-                                deviation
-                                - noise
-                            )
-                        )
-
-                        noise = max(
-                            noise,
-                            1.0
-                        )
-
-
-                # ============================================
-                # BUBBLE ACTIVE
-                # ============================================
-
+                        # Track baseline and noise only outside a pressure drop.
+                        error = raw - baseline
+                        baseline += config.PRESSURE_BASELINE_ALPHA * error
+                        deviation = abs(raw - baseline)
+                        noise += config.PRESSURE_NOISE_ALPHA * (deviation - noise)
+                        noise = max(noise, 1.0)
                 else:
-
-                    release_level = (
-                        threshold
-                        * RELEASE_THRESHOLD_RATIO
-                    )
-
+                    # Require sustained recovery before clearing the bubble.
+                    release_level = threshold * config.PRESSURE_RELEASE_THRESHOLD_RATIO
                     if drop <= release_level:
-
                         if clear_start is None:
-
                             clear_start = now
-
-                        recovered_for = (
-                            now
-                            - clear_start
-                        )
-
-                        if recovered_for >= CLEAR_HOLD_SECONDS:
-
-                            bubble_active = False
-
+                        recovered_for = now - clear_start
+                        if recovered_for >= config.PRESSURE_CLEAR_HOLD_SECONDS:
+                            self.bubble_active = False
                             candidate_start = None
                             clear_start = None
-
-                            log.info(
-                                "Bubble cleared "
-                                "drop=%.0f raw=%d",
-                                drop,
-                                raw
+                            log.info("Bubble cleared drop=%.0f raw=%d", drop, raw)
+                            send(
+                                self.client,
+                                config.TOPIC_BUBBLE,
+                                {"bubble": 0},
+                                retain=True,
                             )
-
-                            client.publish(
-                                MQTT_TOPIC_BUBBLE,
-                                "0",
-                                retain=True
-                            )
-
                     else:
-
                         clear_start = None
-
-
-                # ============================================
-                # MQTT TELEMETRY
-                # ============================================
-
-                if (
-                    now - last_telemetry
-                    >= MQTT_TELEMETRY_INTERVAL
-                ):
-
-                    client.publish(
-                        MQTT_TOPIC_RAW,
-                        str(raw),
-                        retain=True
+                if now - last_telemetry >= config.PRESSURE_TELEMETRY_INTERVAL_S:
+                    # Limit MQTT traffic while detection runs at the sensor rate.
+                    send(
+                        self.client,
+                        config.TOPIC_PRESSURE_RAW,
+                        {"raw": raw},
+                        retain=True,
                     )
-
-                    client.publish(
-                        MQTT_TOPIC_DROP,
-                        f"{drop:.0f}",
-                        retain=True
+                    send(
+                        self.client,
+                        config.TOPIC_PRESSURE_DROP,
+                        {"drop": round(drop, 0)},
+                        retain=True,
                     )
-
-                    client.publish(
-                        MQTT_TOPIC_THRESHOLD,
-                        f"{threshold:.0f}",
-                        retain=True
+                    send(
+                        self.client,
+                        config.TOPIC_PRESSURE_THRESHOLD,
+                        {"threshold": round(threshold, 0)},
+                        retain=True,
                     )
-
-                    if calibration_enabled():
-
-                        kpa = raw_to_kpa(
-                            raw
+                    if self.calibration_enabled():
+                        kpa = self.raw_to_kpa(raw)
+                        send(
+                            self.client,
+                            config.TOPIC_PRESSURE,
+                            {"pressure": round(kpa, 4)},
+                            retain=True,
                         )
-
-                        client.publish(
-                            MQTT_TOPIC_KPA,
-                            f"{kpa:.4f}",
-                            retain=True
-                        )
-
                     last_telemetry = now
-
-
-                # ============================================
-                # CONSOLE STATUS
-                # ============================================
-
                 if now - last_log >= 1.0:
-
                     log.info(
-                        "raw=%d "
-                        "baseline=%.0f "
-                        "drop=%.0f "
-                        "threshold=%.0f "
-                        "noise=%.0f "
-                        "bubble=%d",
+                        "raw=%d baseline=%.0f drop=%.0f threshold=%.0f noise=%.0f bubble=%d",
                         raw,
                         baseline,
                         drop,
                         threshold,
                         noise,
-                        1 if bubble_active else 0
+                        1 if self.bubble_active else 0,
                     )
-
                     last_log = now
-
-
             except TimeoutError as exc:
-
-                log.warning(
-                    "%s",
-                    exc
-                )
-
+                log.warning("%s", exc)
             except Exception:
+                log.exception("Pressure processing error")
 
-                log.exception(
-                    "Pressure processing error"
-                )
+    def run(self):
+        try:
+            self.setup_gpio()
+            connect_and_start(self.client, "pressure-hardware")
+            self._read_loop()
+        finally:
+            try:
+                send(self.client, config.TOPIC_BUBBLE, {"bubble": 0}, retain=True)
+            finally:
+                try:
+                    self.client.loop_stop()
+                    self.client.disconnect()
+                finally:
+                    self.cleanup_gpio()
 
-    finally:
 
-        client.publish(
-            MQTT_TOPIC_BUBBLE,
-            "0",
-            retain=True
-        )
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    client = PressureHardwareClient()
+    client.run()
 
-        client.loop_stop()
-
-        client.disconnect()
-
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
-
     try:
-
         main()
-
     except KeyboardInterrupt:
-
-        log.info(
-            "Stopped by user"
-        )
-
+        log.info("Stopped by user")
     except Exception:
-
-        log.exception(
-            "Fatal error"
-        )
-
-    finally:
-
-        cleanup_gpio()
+        log.exception("Fatal error")

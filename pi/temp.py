@@ -4,41 +4,21 @@ import glob
 import logging
 import time
 
-import paho.mqtt.client as mqtt
+import config
+from mqtt_common import connect_and_start, make_client, send
+
+log = logging.getLogger("temperature_hardware")
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-MQTT_BROKER = "127.0.0.1"
-MQTT_PORT = 1883
-MQTT_TOPIC = "temperature"
-
-PUBLISH_INTERVAL = 20
-
-# Publish as retained message so new subscribers immediately
-# receive the most recent temperature.
-MQTT_RETAIN = True
+class TemperatureHardwareClient:
+ def _init_ (self):
+     self.sensor_path = None
+     self.client = make_client("biodigester_temperature_hardware")
 
 
-# ============================================================
-# LOGGING
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
-
-log = logging.getLogger("ds18b20")
 
 
-# ============================================================
-# DS18B20
-# ============================================================
-
-def find_sensor():
+def find_sensor(self):
     """
     DS18B20 devices have 1-Wire family ID 28.
     """
@@ -62,15 +42,19 @@ def find_sensor():
     return sensor_path
 
 
-def read_temperature(sensor_path):
+
+def read_temperature(self):
     """
     Read temperature from the Linux w1_therm driver.
 
     The temperature file returns millidegrees Celsius.
     """
 
+    if self.sensor_path is None:
+        self.find_sensor
+
     temperature_file = (
-        sensor_path + "/temperature"
+        self.sensor_path + "/temperature"
     )
 
     with open(
@@ -85,95 +69,59 @@ def read_temperature(sensor_path):
 
     return temperature_c
 
-
-# ============================================================
-# MQTT
-# ============================================================
-
-def create_mqtt_client():
-
-    try:
-        client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2
-        )
-
-    except AttributeError:
-        client = mqtt.Client()
-
-    return client
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    sensor = find_sensor()
-
-    client = create_mqtt_client()
-
+def publish_temperature(self):
+    send(
+        self.client,
+        config.TOPIC_TEMPERATURE,
+        {"temperature": round(float(self.temperature_c), 3)},
+        retain=config.MQTT_RETAIN,
+    )
     log.info(
-        "Connecting to MQTT broker %s:%d",
-        MQTT_BROKER,
-        MQTT_PORT
-    )
-
-    client.connect(
-        MQTT_BROKER,
-        MQTT_PORT,
-        keepalive=60
-    )
-
-    client.loop_start()
-
-    try:
-
-        while True:
-
-            try:
-
-                temperature = read_temperature(
-                    sensor
-                )
-
-                payload = f"{temperature:.3f}"
-
-                result = client.publish(
-                    MQTT_TOPIC,
-                    payload,
-                    qos=0,
-                    retain=MQTT_RETAIN
-                )
-
-                log.info(
                     "Temperature %.3f C -> %s",
-                    temperature,
-                    MQTT_TOPIC
+                    self.temperature_c,
+                    config.TOPIC_TEMPERATURE
                 )
 
-            except FileNotFoundError:
 
+def run(self):
+
+    self.find_sensor()
+    connect_and_start(self.client, "temperature_hardware")
+    try:
+        while True:
+            try:
+                self.publish_temperature(self.read_temperature()) 
+            except FileNotFoundError:
                 log.warning(
                     "DS18B20 disappeared; trying to find it again"
                 )
+                self.sensor_path = None
 
-                sensor = find_sensor()
+            try:
+                self.find_sensor()
+            except RuntimeError:
+                pass
 
             except Exception:
-
                 log.exception(
                     "Temperature read/publish failed"
                 )
-
             time.sleep(
-                PUBLISH_INTERVAL
+                config.PUBLISH_INTERVAL
             )
-
     finally:
+        self.client.loop_stop()
+        self.client.disconnect()
 
-        client.loop_stop()
-        client.disconnect()
+
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s"
+    )
+    client = TemperatureHardwareClient()
+    client.run
+
 
 
 if __name__ == "__main__":
