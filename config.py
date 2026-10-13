@@ -19,7 +19,7 @@ MQTT_RETAIN = True
 
 TOPIC_TEMPERATURE = f"{ROOT}/sensors/temperature"
 TOPIC_PRESSURE = f"{ROOT}/sensors/pressure"
-# Reserved for the future pH sensor. Nothing publishes or controls from it yet.
+# pH is monitoring-only; never used by the heater controller.
 TOPIC_PH = f"{ROOT}/sensors/ph"
 
 
@@ -42,7 +42,7 @@ TOPIC_SIM_FAULT = f"{ROOT}/sim/fault"
 TOPIC_SIM_STATE = f"{ROOT}/sim/state"
 
 # --------------------------------------------------------------- Active sensors
-# Add pH to this dictionary when a real/simulated pH source is implemented.
+
 SENSORS = {
     "temperature": {
         "topic": TOPIC_TEMPERATURE,
@@ -58,15 +58,17 @@ SENSORS = {
     },
 }
 
-# Explicit extension point so pH can be added without changing the architecture.
-FUTURE_SENSORS = {
-    "ph": {
-        "topic": TOPIC_PH,
-        "label": "pH",
-        "unit": "pH",
-        "description": "Reserved for a future pH sensor implementation.",
-    }
+# pH notification settings (independent of temperature control).
+SENSORS["ph"] = {
+    "topic": TOPIC_PH, "label": "Last measured pH", "unit": "pH",
+    "description": "Intermittent pH measurements; dots show individual samples, not continuous sensing.",
 }
+FUTURE_SENSORS = {}
+DEFAULT_PH_MIN = 4.2
+DEFAULT_PH_MAX = 6.0
+PH_SAMPLE_PERIOD_S = 10.0  # Real seconds, independent of SIM_SPEED.
+PH_STALE_AFTER_S = 30.0
+SIM_PH_ENABLED = True  # Disable before publishing real probe measurements.
 
 
 # Real temp:

@@ -1,8 +1,8 @@
 # Biodigester monitor
 
-A browser app for temperature and gas pressure, with live readings, history,
+A browser app for temperature, gas pressure and intermittent pH, with live readings, history,
 reports, heater status, alarms and temperature range controls.
-pH has a reserved topic in `config.py` for future implementation.
+pH is monitoring-only and never affects heater control.
 
 ## Set up once
 
@@ -107,7 +107,8 @@ listens on this computer only by default.
 
 Sensor messages are JSON objects such as `{"temperature": 36.42}` on
 `biodigester/sensors/temperature`, `{"pressure": 2.43}` on
-`biodigester/sensors/pressure`. `biodigester/sensors/ph` is reserved for later.
+`biodigester/sensors/pressure`, and `{"ph": 5.2, "valid": true}` on
+`biodigester/sensors/ph` for a valid probe measurement.
 The heater receives `{"action": "ON"}` or `{"action": "OFF"}` on
 `biodigester/heater/cmd`. It reports relay state, safety cut-out state and effective
 power on `biodigester/heater/state`, for example
@@ -119,7 +120,7 @@ Heater commands are sent fresh each cycle; status and range messages are retaine
 ## Check the code
 
 ```bash
-python -m pytest -q tests/test_current_services.py
+python -m pytest -q tests/test_current_services.py tests/test_ph_monitoring.py
 ```
 
 These checks exercise the current services without hardware or a broker.
@@ -129,3 +130,50 @@ live MQTT tests also need updated fault names and heater payloads before use.
 
 If the app shows no readings, check that Mosquitto is running. If it waits for
 the controller, use `--demo` or start `controller.py` separately.
+
+## pH monitoring update
+
+The top row now shows Temperature, Pressure and Last measured pH. The existing
+controller/heater panel follows, then the pH monitoring panel. All existing
+controller, heater, safety, fault injection and temperature history behaviour
+remains unchanged.
+
+- Defaults: minimum 4.2, maximum 6.0. Values exactly on either limit are in range.
+- Edit both limits and select **Save pH limits**. Invalid or empty limits are
+  rejected. Saved limits persist in this browser, independently of the controller.
+- The notification and pH value use green (within limits), amber (low) or red
+  (high), with explicit status text. Older readings are grey and labelled.
+- Simulation produces one random measurement every 10 real seconds, unaffected
+  by the accelerated tank simulation. Each six-sample cycle has four in-range
+  readings, one low and one high relative to the default limits. Changing the
+  notification limits does not change simulated measurements.
+- pH history uses individual dots with no joining lines, including in Report
+  and Sensor history. Both dashed lines and dot colours use the currently saved
+  limits, including for earlier measurements. The dedicated chart has a time filter.
+- Measurements are saved in the existing readings CSV. Retained MQTT values
+  are not logged as new measurements and have unknown measurement time.
+- No recent reading (30 seconds), lost broker connection, and waiting for data
+  are shown explicitly. An old reading is never presented as a current reading.
+
+### Connecting the real pH probe later
+
+Set `SIM_PH_ENABLED = False` in `config.py` and restart the simulator before
+using a real pH source. Your hardware adapter should publish only when the
+probe is inserted and a stable valid measurement is taken, for example after
+an operator presses a physical/software measurement button. Probe insertion
+cannot be inferred reliably from its numeric reading alone; hardware-specific
+acquisition and calibration remain in that adapter.
+
+Publish `{"ph": 5.2, "valid": true}` without MQTT retention on
+`biodigester/sensors/ph`. Values outside 0–14, non-finite values and explicit
+`"valid": false` samples are ignored. The simulator includes `"simulated": true`
+so its values are clearly labelled. Times shown are local receipt times on the
+computer running the dashboard; publish real measurements when acquired.
+Do not continuously publish an old sample while the probe is removed.
+
+### Changed files
+
+`config.py`, `dashboard.py`, `monitoring/monitoring_service.py`,
+`simulation/simulator_service.py`, and this README; added
+`monitoring/ph_monitor.py` and `tests/test_ph_monitoring.py`.
+No additional runtime dependencies are required.

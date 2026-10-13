@@ -14,11 +14,12 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
-from dash import ALL, Dash, Input, Output, State, ctx, dcc, html
+from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 from plotly.subplots import make_subplots
 
 import config
 from monitoring.monitoring_service import MonitoringService
+from monitoring.ph_monitor import classify, validate_limits
 
 monitor = MonitoringService()
 lock = monitor.lock
@@ -54,10 +55,12 @@ def empty_fig(message):
     return fig
 
 
-def history_fig(key, minutes):
+def history_fig(key, minutes, limits=None):
     """Plot one sensor's history with temperature limits where applicable."""
     df = load_df(minutes)
     df = df[df["sensor"] == key]
+    if key == "ph":
+        return ph_figure(df, limits)
     if df.empty:
         return empty_fig("No logged data yet for this sensor")
     sensor = config.SENSORS[key]
@@ -74,7 +77,7 @@ def history_fig(key, minutes):
     return fig
 
 
-def report_fig(keys, minutes):
+def report_fig(keys, minutes, limits=None):
     """Plot each selected sensor on its own row so units stay separate."""
     if not keys:
         return empty_fig("Tick at least one sensor")
@@ -86,10 +89,46 @@ def report_fig(keys, minutes):
     for row, key in enumerate(keys, start=1):
         data = df[df["sensor"] == key]
         sensor = config.SENSORS[key]
-        fig.add_trace(go.Scatter(x=data["timestamp"], y=data["value"], mode="lines",
+        fig.add_trace(go.Scatter(x=data["timestamp"], y=data["value"],
+                                 mode="markers" if key == "ph" else "lines",
+                                 marker=ph_markers(data, limits) if key == "ph" else None,
                                  name=sensor["label"]), row=row, col=1)
+        if key == "ph":
+            add_ph_limits(fig, limits, row=row, col=1)
         fig.update_yaxes(title_text=f"{sensor['label']} ({sensor['unit']})", row=row, col=1)
     fig.update_layout(height=260 * len(keys) + 80, margin={"t": 20}, showlegend=False)
+    return fig
+
+
+def ph_limits(limits):
+    if not isinstance(limits, dict) or validate_limits(limits.get("low"), limits.get("high")):
+        return config.DEFAULT_PH_MIN, config.DEFAULT_PH_MAX
+    return limits["low"], limits["high"]
+
+
+def ph_markers(data, limits):
+    low, high = ph_limits(limits)
+    return {"size": 9, "color": [classify(v, low, high)[1] for v in data["value"]]}
+
+
+def add_ph_limits(fig, limits, **kwargs):
+    low, high = ph_limits(limits)
+    for value, label, color in ((low, "Minimum", "#b45309"), (high, "Maximum", "#b3261e")):
+        fig.add_hline(y=value, line_dash="dash", line_color=color,
+                      annotation_text=f"{label}: {value:g}", **kwargs)
+
+
+def ph_figure(data, limits):
+    fig = go.Figure(go.Scatter(x=data["timestamp"], y=data["value"], mode="markers",
+                              marker=ph_markers(data, limits), name="pH reading",
+                              hovertemplate="%{x|%d %b %H:%M:%S}<br>pH %{y:.2f}<extra></extra>"))
+    add_ph_limits(fig, limits)
+    if data.empty:
+        fig.add_annotation(text="Waiting for a valid pH measurement", x=0.5, y=0.5,
+                           xref="paper", yref="paper", showarrow=False)
+    fig.update_layout(template="plotly_white", height=330, margin={"t": 35, "r": 35, "b": 45},
+                      xaxis_title="Measurement time", yaxis_title="pH", uirevision="ph")
+    fig.update_xaxes(type="date")
     return fig
 
 
@@ -131,41 +170,44 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
     html.H2("Biodigester Monitoring Application"),
     html.Div(id="status", style={"marginBottom": "12px"}),
 
-    html.H3("Live sensors"),
-    html.Div([sensor_card(key) for key in config.SENSORS], style={"display": "flex", "flexWrap": "wrap"}),
-    html.P("pH is intentionally not simulated yet. The project contains a reserved pH topic/configuration for later implementation.",
-           style={"fontStyle": "italic", "color": "#555"}),
-
-    dcc.Interval(id="tick", interval=2000),
-    dcc.Store(id="selected", data=first_key),
-    dcc.Tabs([
-        dcc.Tab(label="Sensor history", children=[
-            html.H3(id="sensor-title"), html.P(id="sensor-desc"),
-            dcc.Dropdown(range_options, "Last hour", id="hist-range", clearable=False, style={"width": "220px"}),
-            dcc.Graph(id="hist-graph"),
-        ]),
-        dcc.Tab(label="Report", children=[
-            html.Div(style={"marginTop": "12px"}, children=[
-                dcc.Checklist(id="report-sensors", value=[first_key], inline=True,
-                              options=[{"label": f" {config.SENSORS[k]['label']}  ", "value": k}
-                                       for k in config.SENSORS]),
-                dcc.Dropdown(range_options, "Last hour", id="report-range", clearable=False, style={"width": "220px"}),
-                dcc.Graph(id="report-graph"),
-            ])
-        ]),
-    ]),
+    html.Div([sensor_card(key) for key in config.SENSORS],
+             style={"display": "flex", "justifyContent": "center", "flexWrap": "wrap", "marginBottom": "16px"}),
 
     html.Div(style={"background": "#f3f5f4", "padding": "16px", "borderRadius": "10px"}, children=[
         html.H3("Controller and heater"),
         html.Div(id="controller-status", role="status"),
         html.Div(style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "marginTop": "12px"}, children=[
-                dcc.Input(id="range-low", type="number", value=config.DEFAULT_LOW_C, step=0.1),
+            html.Label("Lower temperature (°C)", htmlFor="range-low"),
+            dcc.Input(id="range-low", type="number", value=config.DEFAULT_LOW_C, step=0.1),
             html.Label("Upper temperature (°C)", htmlFor="range-high"),
             dcc.Input(id="range-high", type="number", value=config.DEFAULT_HIGH_C, step=0.1),
             html.Button("Save range", id="save-range", n_clicks=0),
         ]),
         html.Div(id="range-result", role="status"),
     ]),
+
+    html.Div(style={"marginTop": "16px", "padding": "20px", "border": "1px solid #d9e2e7",
+                    "borderRadius": "10px", "background": "#fafcfd"}, children=[
+        html.H3("pH monitoring"),
+        html.P("Notification limits only — these settings do not control pH or the heater."),
+        html.Div(style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "alignItems": "center"}, children=[
+            html.Label("Minimum pH", htmlFor="ph-low"),
+            dcc.Input(id="ph-low", type="number", min=0, max=14, step=0.1, value=config.DEFAULT_PH_MIN),
+            html.Label("Maximum pH", htmlFor="ph-high"),
+            dcc.Input(id="ph-high", type="number", min=0, max=14, step=0.1, value=config.DEFAULT_PH_MAX),
+            html.Button("Save pH limits", id="save-ph", n_clicks=0),
+        ]),
+        html.Div(id="ph-result", role="status", style={"marginTop": "8px"}),
+        html.Div(id="ph-notification", role="status", **{"aria-live": "polite"},
+                 style={"padding": "12px 0"}),
+        html.H4("pH measurements over time"),
+        html.P("Each dot is one measurement. Simulation records one sample every 10 seconds. "
+               "Dot colours use the currently saved limits."),
+        dcc.Dropdown(range_options, "Last hour", id="ph-history-range", clearable=False,
+                     style={"width": "220px"}),
+        dcc.Graph(id="ph-graph"),
+    ]),
+    dcc.Store(id="ph-limits", storage_type="local"),
 
     html.Div(style={"marginTop": "16px"}, children=[
         html.H3("Active faults and alarms"),
@@ -189,7 +231,26 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
         ]),
         html.Div(id="fault-result", role="status"),
         html.Div(id="sim-status"),
-    ]),    html.Label("Lower temperature (°C)", htmlFor="range-low"),
+    ]),
+
+    dcc.Interval(id="tick", interval=2000),
+    dcc.Store(id="selected", data=first_key),
+    dcc.Tabs([
+        dcc.Tab(label="Sensor history", children=[
+            html.H3(id="sensor-title"), html.P(id="sensor-desc"),
+            dcc.Dropdown(range_options, "Last hour", id="hist-range", clearable=False, style={"width": "220px"}),
+            dcc.Graph(id="hist-graph"),
+        ]),
+        dcc.Tab(label="Report", children=[
+            html.Div(style={"marginTop": "12px"}, children=[
+                dcc.Checklist(id="report-sensors", value=[first_key], inline=True,
+                              options=[{"label": f" {config.SENSORS[k]['label']}  ", "value": k}
+                                       for k in config.SENSORS]),
+                dcc.Dropdown(range_options, "Last hour", id="report-range", clearable=False, style={"width": "220px"}),
+                dcc.Graph(id="report-graph"),
+            ])
+        ]),
+    ]),
 ])
 
 
@@ -204,10 +265,17 @@ def refresh_cards(_):
     for key, sensor in config.SENSORS.items():
         if key not in latest:
             values.append("—")
-            stamps.append("waiting for data")
+            stamps.append("waiting for pH measurement" if key == "ph" else "waiting for data")
             continue
         value, stamp, retained, received = latest[key]
         values.append(f"{value:.2f} {sensor['unit']}")
+        if key == "ph":
+            source = "Simulated pH" if monitor.ph_simulated else "pH measurement"
+            qualifier = "saved; measurement time unknown" if retained else stamp.strftime("last measured %d %b %H:%M:%S")
+            if not connected or time.monotonic() - received > config.PH_STALE_AFTER_S:
+                qualifier += "; no recent reading"
+            stamps.append(f"{source} · {qualifier}")
+            continue
         stale = time.monotonic() - received > config.TEMP_STALE_AFTER_S
         if retained:
             stamps.append("saved value; waiting for live data")
@@ -236,16 +304,16 @@ def pick_sensor(_):
 
 @app.callback(Output("hist-graph", "figure"), Output("sensor-title", "children"),
               Output("sensor-desc", "children"), Input("selected", "data"),
-              Input("hist-range", "value"), Input("tick", "n_intervals"))
-def update_history(key, range_name, _):
+              Input("hist-range", "value"), Input("tick", "n_intervals"), Input("ph-limits", "data"))
+def update_history(key, range_name, _, limits=None):
     sensor = config.SENSORS[key]
-    return history_fig(key, RANGES[range_name]), sensor["label"], sensor["description"]
+    return history_fig(key, RANGES[range_name], limits), sensor["label"], sensor["description"]
 
 
 @app.callback(Output("report-graph", "figure"), Input("report-sensors", "value"),
-              Input("report-range", "value"), Input("tick", "n_intervals"))
-def update_report(keys, range_name, _):
-    return report_fig(keys, RANGES[range_name])
+              Input("report-range", "value"), Input("tick", "n_intervals"), Input("ph-limits", "data"))
+def update_report(keys, range_name, _, limits=None):
+    return report_fig(keys, RANGES[range_name], limits)
 
 
 @app.callback(Output("controller-status", "children"), Output("save-range", "disabled"),
@@ -313,6 +381,53 @@ def inject_fault(_):
 @app.callback(Output("ack-result", "children"), Input("ack-faults", "n_clicks"), prevent_initial_call=True)
 def acknowledge_faults(_):
     return monitor.acknowledge_faults()
+
+
+@app.callback(Output("ph-limits", "data"), Output("ph-result", "children"),
+              Input("save-ph", "n_clicks"), State("ph-low", "value"),
+              State("ph-high", "value"), prevent_initial_call=True)
+def save_ph_limits(_, low, high):
+    problem = validate_limits(low, high)
+    if problem:
+        return no_update, problem
+    return {"low": float(low), "high": float(high)}, "pH notification limits saved in this browser."
+
+
+@app.callback(Output("ph-low", "value"), Output("ph-high", "value"), Input("ph-limits", "data"))
+def restore_ph_limits(limits):
+    return ph_limits(limits)
+
+
+@app.callback(Output("ph-notification", "children"), Output("ph-graph", "figure"),
+              Output({"type": "val", "key": "ph"}, "style"),
+              Input("tick", "n_intervals"), Input("ph-limits", "data"),
+              Input("ph-history-range", "value"))
+def refresh_ph(_, limits, range_name):
+    low, high = ph_limits(limits)
+    data = load_df(RANGES[range_name])
+    figure = ph_figure(data[data["sensor"] == "ph"], limits)
+    latest, _, connected = monitor.snapshot()
+    entry = latest.get("ph")
+    color = "#666"
+    if entry is None:
+        message = "Waiting for a valid pH measurement."
+    else:
+        value, stamp, retained, received = entry
+        label, color = classify(value, low, high)
+        source = "Simulated pH" if monitor.ph_simulated else "Measured pH"
+        detail = (f"below minimum {low:g}" if value < low else
+                  f"above maximum {high:g}" if value > high else f"within {low:g}–{high:g}")
+        message = f"{source} · {label}: {value:.2f} — {detail}. "
+        if retained:
+            message += "Saved reading; measurement time unknown. Waiting for a new measurement."
+            color = "#666"
+        else:
+            message += stamp.strftime("Last measured %d %b %Y at %H:%M:%S.")
+            if not connected or time.monotonic() - received > config.PH_STALE_AFTER_S:
+                message += " No recent pH reading; this status describes the last measurement only."
+                color = "#666"
+    return html.Strong(message, style={"color": color}), figure, {
+        "fontSize": "28px", "margin": "4px 0", "color": color}
 
 
 def main():
