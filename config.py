@@ -10,21 +10,34 @@ from pathlib import Path
 BROKER_HOST = "localhost"
 BROKER_PORT = 1883
 KEEPALIVE_S = 30
+MQTT_USERNAME = None
+MQTT_PASSWORD = None
 
-ROOT = "biodigester"
+MQTT_ROOT = "biodigester"
+MQTT_RETAIN = 
+
+
 TOPIC_TEMPERATURE = f"{ROOT}/sensors/temperature"
 TOPIC_PRESSURE = f"{ROOT}/sensors/pressure"
 # Reserved for the future pH sensor. Nothing publishes or controls from it yet.
 TOPIC_PH = f"{ROOT}/sensors/ph"
 
-TOPIC_HEATER_CMD = f"{ROOT}/heater/cmd"
-TOPIC_HEATER_STATE = f"{ROOT}/heater/state"
-TOPIC_SAFETY_CMD = f"{ROOT}/heater/safety/cmd"
+
+# This is where the heater commands sit:
+TOPIC_PELTIET_CMD =f"{ROOT}/peltier/cmd"
+TOPIC_PELTIET_STATE =f"{ROOT}/peltier/state"
+# safety latch:
+TOPIC_PELTEIR_SAFETY = f"{ROOT}/peltier/safety"
+
+
+# Controller topics:
 TOPIC_THRESHOLDS = f"{ROOT}/control/thresholds"
 TOPIC_STATUS = f"{ROOT}/control/status"
+
 TOPIC_FAULT_STATE = f"{ROOT}/faults/state"
 TOPIC_FAULT_EVENT = f"{ROOT}/faults/event"
 TOPIC_FAULT_ACK = f"{ROOT}/faults/ack"
+
 TOPIC_SIM_FAULT = f"{ROOT}/sim/fault"
 TOPIC_SIM_STATE = f"{ROOT}/sim/state"
 
@@ -55,6 +68,23 @@ FUTURE_SENSORS = {
     }
 }
 
+
+# Real temp:
+TEMP_SENSOR_GLOB = "/sys/bus/w1/devices/28-*"
+TEMP_PUBLISH_INTERVAL_S = 2.0
+TEMP_MQTT_RETAIN = True
+
+PELTIER_GPIO_CHIP = 0
+PELTIER_RPWM_PIN = 18
+PELTIER_LPWM_PIN = 19
+PELTIER_PWM_FREQUENCY_HZ = 1000
+PELTIER_DIRECTION_CHANGE_DELAY_S = 0.050
+PELTIER_COMMAND_TIMEOUT_S = 10.0
+PELTIER_DEADBAND_PERCENT = 1.0
+PELTIER_FEEDBACK_TOLERANCE_PERCENT = 1.0
+
+
+
 # ---------------------------------------------------------- Temperature control
 DEFAULT_LOW_C = 35.0
 DEFAULT_HIGH_C = 37.0
@@ -65,6 +95,10 @@ STRATEGY = "hysteresis"
 CONTROL_PERIOD_S = 1.0
 MIN_ON_S = 5.0
 MIN_OFF_S = 5.0
+
+PELTIER_HEAT_POWER = 100.0
+PELTIER_IDLE_POWER = 0.0
+
 
 # ---------------------------------------------------------- Sensor diagnostics
 TEMP_STALE_AFTER_S = 10.0
@@ -81,9 +115,9 @@ HIGH_HIGH_TEMP_C = 42.0
 
 # ---------------------------------------------------------- Heater diagnostics
 ACTUATOR_FEEDBACK_TIMEOUT_S = 5.0
-HEATER_RESPONSE_WINDOW_S = 12.0
-HEATER_MIN_RISE_C = 0.08
-HEATER_COMMAND_TIMEOUT_S = 10.0
+PELTIER_RESPONSE_WINDOW_S = 12.0
+PELTIER_MIN_RISE_C = 0.08
+PELTIER_COMMAND_TIMEOUT_S = 10.0
 
 # ------------------------------------------------------------------- Simulator
 SIM_SPEED = 60.0
