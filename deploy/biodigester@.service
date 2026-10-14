@@ -1,0 +1,24 @@
+[Unit]
+Description=Biodigester %i
+After=network.target mosquitto.service
+PartOf=biodigester.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/biodigester
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/pi/biodigester/service.env
+ExecStart=/bin/bash /home/pi/biodigester/run-services.sh %i
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=biodigester.target

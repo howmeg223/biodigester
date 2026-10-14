@@ -1,0 +1,9 @@
+[Unit]
+Description=Biodigester hardware, controller and data logging
+Wants=mosquitto.service
+Wants=biodigester@temperature.service biodigester@pressure.service biodigester@peltier.service
+Wants=biodigester@controller.service biodigester@dashboard.service
+After=mosquitto.service
+
+[Install]
+WantedBy=multi-user.target

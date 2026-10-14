@@ -252,3 +252,5 @@ multiple browser tabs are fine. Older analysis files and existing calibration
 settings should be kept when installing an update.
 
 See [DASHBOARD_UPDATE.md](DASHBOARD_UPDATE.md) for installing the analysis update while preserving Pi configuration and existing data.
+
+See [SERVICES.md](SERVICES.md) to start the hardware, controller and dashboard automatically at boot using systemd.

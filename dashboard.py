@@ -22,6 +22,7 @@ import config
 from monitoring.monitoring_service import MonitoringService
 from monitoring.ph_monitor import classify, validate_limits
 from monitoring.reporting import read_table, sampling_intervals, analysis_readings, bubble_rate
+from mqtt_common import stop_requested
 
 monitor = MonitoringService()
 lock = monitor.lock
@@ -626,6 +627,7 @@ def main():
     parser.add_argument("--demo", action="store_true",
                         help="start controller and simulator as child processes")
     args = parser.parse_args()
+    signal.signal(signal.SIGTERM, stop_requested)
     children = []
     try:
         if args.demo:
