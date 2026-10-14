@@ -93,8 +93,8 @@ class PressureHardwareClient:
         self.wait_ready()
         value = 0
         # Sample DOUT after lowering SCK, following the datasheet's reference
-        # routine. This keeps the high pulse to two GPIO writes. A Linux
-        # scheduling delay must never silently become a corrupted ADC sample.
+        # routine. Lower SCK immediately, then read the bit while SCK is low.
+        # Python wall-clock measurements cannot establish electrical pulse width.
         for _ in range(24):
             value = value << 1 | self._pulse(read_bit=True)
         for _ in range(config.PRESSURE_EXTRA_CLOCKS):
@@ -106,19 +106,13 @@ class PressureHardwareClient:
 
     def _pulse(self, read_bit):
         lgpio = self._lgpio()
-        start = time.perf_counter_ns()
-        lgpio.gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 1)
+        # No sleeps, logging, timestamps or data reads while SCK is high.
+        # The previous elapsed-time check included Python/GPIO call overhead
+        # and could reset good conversions when Linux scheduled another task.
         try:
-            lgpio.gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 0)
-        finally:
-            # Measure conservatively across both GPIO calls.
-            elapsed = time.perf_counter_ns() - start
-        if elapsed > 50000:  # datasheet maximum SCK high time = 50 microseconds
-            # Force a known reset rather than continue a partial transfer.
             lgpio.gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 1)
-            time.sleep(0.0001)
+        finally:
             lgpio.gpio_write(self.gpio, config.PRESSURE_SCK_PIN, 0)
-            raise OSError("HX710B clock delayed by scheduling; conversion discarded and ADC reset")
         return lgpio.gpio_read(self.gpio, config.PRESSURE_OUT_PIN) if read_bit else 0
 
     def calibration_enabled(self):
@@ -225,6 +219,10 @@ class PressureHardwareClient:
     def run(self):
         try:
             self.setup_gpio()
+            log.info("Pressure mode=%s; calibration=%s", self.mode,
+                     "enabled" if self.calibration_enabled() else "not configured")
+            if self.mode != "bubble" and not self.calibration_enabled():
+                log.warning("kPa publication disabled: set PRESSURE_ZERO_RAW, PRESSURE_CAL_RAW and PRESSURE_CAL_KPA in config.py")
             connect_and_start(self.client, "pressure-hardware")
             self._read_loop()
         finally:
