@@ -16,6 +16,8 @@ class BubbleDetector:
         self.candidate_start = None
         self.clear_start = None
         self.trigger_threshold = None
+        if hasattr(self, "previous_raw"):
+            del self.previous_raw
 
     def update(self, raw, now):
         if self.baseline is None:

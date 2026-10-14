@@ -5,6 +5,7 @@ presents fault notifications/history, and sends operator requests such as range
 changes, acknowledgements, or simulator-only fault injections.
 """
 import argparse
+import math
 from datetime import datetime, timedelta
 import signal
 import subprocess
@@ -20,6 +21,7 @@ from plotly.subplots import make_subplots
 import config
 from monitoring.monitoring_service import MonitoringService
 from monitoring.ph_monitor import classify, validate_limits
+from monitoring.reporting import read_table, sampling_intervals, analysis_readings, bubble_rate
 
 monitor = MonitoringService()
 lock = monitor.lock
@@ -34,16 +36,77 @@ RANGES = {
 }
 
 
-def load_df(minutes=None):
-    """Read logged samples into a pandas table, optionally keeping recent rows."""
+REPORT_SENSORS = {**config.SENSORS, "bubble_rate": {"label": "Bubble rate", "unit": "bubbles/min"}}
+
+
+def read_analysis_files():
     with lock:
-        try:
-            df = pd.read_csv(monitor.log_file, parse_dates=["timestamp"])
-        except (FileNotFoundError, pd.errors.EmptyDataError):
-            df = pd.DataFrame(columns=["timestamp", "sensor", "value"])
+        readings = read_table(monitor.log_file, ["timestamp", "sensor", "value"])
+        events = read_table(monitor.bubble_file, ["timestamp", "session", "count"])
+        markers = read_table(monitor.sampling_file, ["timestamp", "event"])
+        coverage = read_table(monitor.coverage_file, ["timestamp", "available"])
+    return readings, events, markers, coverage
+
+
+def load_df(minutes=None, include_sampling=False):
+    with lock:
+        readings = read_table(monitor.log_file, ["timestamp", "sensor", "value"])
+        markers = read_table(monitor.sampling_file, ["timestamp", "event"])
+    df = analysis_readings(readings, sampling_intervals(markers), include_sampling)
     if minutes and len(df):
         df = df[df["timestamp"] >= datetime.now() - timedelta(minutes=minutes)]
     return df
+
+
+def report_data(keys, minutes=None, start=None, end=None, interval=1, include_sampling=False):
+    readings, events, markers, coverage = read_analysis_files()
+    end = pd.Timestamp(end or datetime.now())
+    if start is None:
+        if minutes:
+            start = end - pd.Timedelta(minutes=minutes)
+        else:
+            stamps = [df.timestamp.min() for df in (readings,events,coverage) if not df.empty]
+            start = min(stamps) if stamps else end - pd.Timedelta(hours=1)
+    start = pd.Timestamp(start)
+    if start >= end:
+        raise ValueError("Start must be before end")
+    periods = sampling_intervals(markers, end)
+    df = analysis_readings(readings, periods, include_sampling)
+    df = df[df.sensor.isin(keys) & (df.timestamp >= start) & (df.timestamp < end)]
+    if "bubble_rate" in keys:
+        coverage = coverage[(coverage.timestamp >= start-pd.Timedelta(seconds=config.PRESSURE_STALE_AFTER_S)) & (coverage.timestamp <= end)]
+        rate = bubble_rate(events, coverage, start, end, interval,
+                           () if include_sampling else periods)
+        df = pd.concat([df, rate], ignore_index=True)
+    return df.sort_values("timestamp", kind="stable"), periods, start, end
+
+
+def graph_samples(data, key, periods, start, end, include_sampling):
+    if key == "ph" or data.empty:
+        return data
+    data = data.copy()
+    original_stamps = data.timestamp.sort_values()
+    if key != "bubble_rate" and len(data) > 5000:
+        seconds = max(1, math.ceil((data.timestamp.max()-data.timestamp.min()).total_seconds()/5000))
+        data = data.set_index("timestamp")[["value"]].resample(f"{seconds}s").mean().reset_index()
+        data["source"] = f"{seconds}-second mean (CSV export retains individual samples)"
+    # Explicit gaps stop Plotly drawing straight lines through excluded periods.
+    gaps = []
+    if not include_sampling:
+        for a,b in periods:
+            if a < end and b > start:
+                gaps.append({"timestamp": max(a,start), "value": float("nan"), "source": "sampling"})
+    limit = config.TEMP_STALE_AFTER_S if key == "temperature" else config.PRESSURE_STALE_AFTER_S
+    if key != "bubble_rate":
+        for previous in original_stamps.shift(1)[original_stamps.diff().dt.total_seconds() > limit]:
+            gaps.append({"timestamp": previous + pd.Timedelta(microseconds=1), "value": float("nan"), "source": "data gap"})
+    if key == "bubble_rate" and not data.empty and data.timestamp.iloc[-1] < end:
+        final = data.iloc[-1].copy()
+        final["timestamp"] = end
+        data = pd.concat([data, pd.DataFrame([final])], ignore_index=True)
+    if gaps:
+        data = pd.concat([data, pd.DataFrame(gaps)], ignore_index=True).sort_values("timestamp", kind="stable")
+    return data
 
 
 def empty_fig(message):
@@ -77,26 +140,35 @@ def history_fig(key, minutes, limits=None):
     return fig
 
 
-def report_fig(keys, minutes, limits=None):
-    """Plot each selected sensor on its own row so units stay separate."""
+def report_fig(keys, minutes, limits=None, start=None, end=None, interval=1, include_sampling=False):
+    """Compare CSV histories on separate axes, including calculated bubble rates."""
+    keys = [key for key in dict.fromkeys(keys or []) if key in REPORT_SENSORS]
     if not keys:
         return empty_fig("Tick at least one sensor")
-    df = load_df(minutes)
-    df = df[df["sensor"].isin(keys)]
-    if df.empty:
-        return empty_fig("No logged data in this time range")
+    df, periods, start, end = report_data(keys, minutes, start, end, interval, include_sampling)
+    if df.empty or not df.value.notna().any():
+        return empty_fig("No logged data or confirmed bubble coverage in this time range")
     fig = make_subplots(rows=len(keys), cols=1, shared_xaxes=True, vertical_spacing=0.06)
     for row, key in enumerate(keys, start=1):
-        data = df[df["sensor"] == key]
-        sensor = config.SENSORS[key]
+        data = graph_samples(df[df.sensor == key], key, periods, start, end, include_sampling)
+        sensor = REPORT_SENSORS[key]
         fig.add_trace(go.Scatter(x=data["timestamp"], y=data["value"],
                                  mode="markers" if key == "ph" else "lines",
                                  marker=ph_markers(data, limits) if key == "ph" else None,
+                                 customdata=data["source"], connectgaps=False,
+                                 line={"shape": "hv"} if key == "bubble_rate" else None,
+                                 hovertemplate="%{x}<br>%{y:.3f}<br>%{customdata}<extra></extra>",
                                  name=sensor["label"]), row=row, col=1)
         if key == "ph":
             add_ph_limits(fig, limits, row=row, col=1)
         fig.update_yaxes(title_text=f"{sensor['label']} ({sensor['unit']})", row=row, col=1)
-    fig.update_layout(height=260 * len(keys) + 80, margin={"t": 20}, showlegend=False)
+        for a,b in periods:
+            if a < end and b > start:
+                fig.add_vrect(x0=max(a,start), x1=min(b,end), fillcolor="#f59e0b", opacity=.15,
+                              line_width=0, row=row, col=1)
+    fig.update_xaxes(range=[start, end])
+    fig.update_layout(height=260 * len(keys) + 80, margin={"t": 30}, showlegend=False,
+                      title=f"CSV report · bubble interval {interval:g} min · sampling periods {'included' if include_sampling else 'excluded'}")
     return fig
 
 
@@ -169,6 +241,18 @@ app = Dash(__name__, title="Biodigester Monitor")
 app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "margin": "0 auto", "padding": "16px"}, children=[
     html.H2("Biodigester Monitoring Application"),
     html.Div(id="status", style={"marginBottom": "12px"}),
+    html.Div(style={"padding": "16px", "background": "#fff7e6", "borderRadius": "10px", "marginBottom": "16px"}, children=[
+        html.H3("Vessel sampling"),
+        html.P("Pause analysis before opening the vessel. Raw readings and alarms are still recorded; temperature control stays active. "
+               "Marked periods are excluded from reports by default, while manual pH samples are kept."),
+        dcc.Input(id="sampling-note", type="text", value="pH sampling / vessel open", placeholder="Sampling note", style={"width": "260px"}),
+        html.Button("Pause analysis for sampling", id="pause-analysis", n_clicks=0),
+        html.Label(" Settling time after closing (seconds) "),
+        dcc.Input(id="settle-seconds", type="number", min=0, max=3600, value=getattr(config, "SAMPLING_SETTLE_S", 60), style={"width": "90px"}),
+        html.Button("Resume after settling", id="resume-analysis", n_clicks=0),
+        html.Div(id="sampling-action", role="status"),
+        html.Strong(id="sampling-status", role="status"),
+    ]),
 
     html.Div([sensor_card(key) for key in config.SENSORS],
              style={"display": "flex", "justifyContent": "center", "flexWrap": "wrap", "marginBottom": "16px"}),
@@ -192,6 +276,13 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
     html.Div(style={"marginTop": "16px", "padding": "20px", "border": "1px solid #d9e2e7",
                     "borderRadius": "10px", "background": "#fafcfd"}, children=[
         html.H3("pH monitoring"),
+        html.H4("Log a manual pH measurement"),
+        html.Label("Measured pH ", htmlFor="manual-ph"),
+        dcc.Input(id="manual-ph", type="number", min=0, max=14, step=0.01, placeholder="e.g. 5.25"),
+        html.Label(" Measurement time (optional, Pi local time) ", htmlFor="manual-ph-time"),
+        dcc.Input(id="manual-ph-time", type="text", placeholder="YYYY-MM-DD HH:MM"),
+        html.Button("Publish pH measurement", id="publish-ph", n_clicks=0),
+        html.Div(id="manual-ph-result", role="status"),
         html.P("Notification limits only — these settings do not control pH or the heater."),
         html.Div(style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "alignItems": "center"}, children=[
             html.Label("Minimum pH", htmlFor="ph-low"),
@@ -244,12 +335,30 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
             dcc.Dropdown(range_options, "Last hour", id="hist-range", clearable=False, style={"width": "220px"}),
             dcc.Graph(id="hist-graph"),
         ]),
-        dcc.Tab(label="Report", children=[
+        dcc.Tab(label="Report generator", children=[
             html.Div(style={"marginTop": "12px"}, children=[
-                dcc.Checklist(id="report-sensors", value=[first_key], inline=True,
-                              options=[{"label": f" {config.SENSORS[k]['label']}  ", "value": k}
-                                       for k in config.SENSORS]),
-                dcc.Dropdown(range_options, "Last hour", id="report-range", clearable=False, style={"width": "220px"}),
+                html.H3("Report generator"),
+                html.P("Source: saved CSV files. Choose sensors and a time range. Each sensor has its own axis. "
+                       "Bubble rate = events per interval divided by interval duration in minutes; gaps indicate unconfirmed coverage or sampling. "
+                       "Large temperature/pressure graphs use interval means; CSV exports retain individual samples."),
+                dcc.Checklist(id="report-sensors", value=["temperature", "pressure", "bubble_rate"], inline=True,
+                              options=[{"label": f" {REPORT_SENSORS[k]['label']}  ", "value": k}
+                                       for k in REPORT_SENSORS]),
+                dcc.Dropdown(range_options + [{"label": "Custom dates", "value": "Custom dates"}], "Last hour", id="report-range", clearable=False, style={"width": "220px"}),
+                html.Div(id="custom-report-range", children=[
+                    html.Label("Custom dates (Pi local time) "),
+                    dcc.DatePickerRange(id="report-dates", display_format="DD MMM YYYY"),
+                    html.Label(" Start time "), dcc.Input(id="report-start-time", type="text", value="00:00", style={"width": "80px"}),
+                    html.Label(" End time "), dcc.Input(id="report-end-time", type="text", value="23:59", style={"width": "80px"}),
+                ]),
+                html.Label("Bubble-rate interval "),
+                dcc.Dropdown([{"label": f"{n} minute{'s' if n>1 else ''}", "value": n} for n in (1,5,15,60)],
+                             1, id="bubble-interval", clearable=False, style={"width": "180px"}),
+                dcc.Checklist(id="include-sampling", options=[{"label": " Include sampling periods in analysis", "value": "include"}], value=[]),
+                html.Button("Generate / refresh report", id="generate-report", n_clicks=0),
+                html.Button("Download report CSV", id="download-report", n_clicks=0),
+                dcc.Download(id="report-download"),
+                html.Div(id="report-error", role="status"),
                 dcc.Graph(id="report-graph"),
             ])
         ]),
@@ -313,10 +422,76 @@ def update_history(key, range_name, _, limits=None):
     return history_fig(key, RANGES[range_name], limits), sensor["label"], sensor["description"]
 
 
-@app.callback(Output("report-graph", "figure"), Input("report-sensors", "value"),
-              Input("report-range", "value"), Input("tick", "n_intervals"), Input("ph-limits", "data"))
-def update_report(keys, range_name, _, limits=None):
-    return report_fig(keys, RANGES[range_name], limits)
+def report_bounds(range_name, start_date, end_date, start_time, end_time):
+    if range_name != "Custom dates":
+        return RANGES[range_name], None, None
+    if not start_date or not end_date:
+        raise ValueError("Choose both custom dates")
+    start = datetime.fromisoformat(start_date).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = datetime.fromisoformat(end_date).replace(hour=0, minute=0, second=0, microsecond=0)
+    first = datetime.strptime(start_time or "00:00", "%H:%M")
+    last = datetime.strptime(end_time or "23:59", "%H:%M")
+    start = start.replace(hour=first.hour, minute=first.minute)
+    end = end.replace(hour=last.hour, minute=last.minute) + timedelta(minutes=1)
+    if start >= end:
+        raise ValueError("Start must be before end")
+    return None, start, end
+
+
+@app.callback(Output("report-graph", "figure"), Output("report-error", "children"),
+              Input("report-sensors", "value"), Input("report-range", "value"),
+              Input("generate-report", "n_clicks"), Input("ph-limits", "data"),
+              Input("report-dates", "start_date"), Input("report-dates", "end_date"),
+              Input("report-start-time", "value"), Input("report-end-time", "value"),
+              Input("bubble-interval", "value"), Input("include-sampling", "value"))
+def update_report(keys, range_name, _, limits=None, start_date=None, end_date=None,
+                  start_time="00:00", end_time="23:59", interval=1, include=None):
+    try:
+        minutes, start, end = report_bounds(range_name, start_date, end_date, start_time, end_time)
+        return report_fig(keys, minutes, limits, start, end, interval, "include" in (include or [])), ""
+    except (ValueError, OSError, pd.errors.ParserError) as error:
+        return empty_fig("Cannot generate report"), str(error)
+
+
+@app.callback(Output("report-download", "data"), Input("download-report", "n_clicks"),
+              State("report-sensors", "value"), State("report-range", "value"),
+              State("report-dates", "start_date"), State("report-dates", "end_date"),
+              State("report-start-time", "value"), State("report-end-time", "value"),
+              State("bubble-interval", "value"), State("include-sampling", "value"), prevent_initial_call=True)
+def download_report(_, keys, range_name, start_date, end_date, start_time, end_time, interval, include):
+    try:
+        minutes, start, end = report_bounds(range_name, start_date, end_date, start_time, end_time)
+        keys = [key for key in (keys or []) if key in REPORT_SENSORS]
+        if not keys: return no_update
+        data, _, _, _ = report_data(keys, minutes, start, end, interval, "include" in (include or []))
+        return dcc.send_data_frame(data.to_csv, "biodigester-report.csv", index=False)
+    except (ValueError, OSError, pd.errors.ParserError):
+        return no_update
+
+
+@app.callback(Output("manual-ph-result", "children"), Input("publish-ph", "n_clicks"),
+              State("manual-ph", "value"), State("manual-ph-time", "value"), prevent_initial_call=True)
+def publish_manual_ph(_, value, measured_at):
+    return monitor.log_manual_ph(value, measured_at)
+
+
+@app.callback(Output("sampling-action", "children"), Input("pause-analysis", "n_clicks"),
+              Input("resume-analysis", "n_clicks"), State("sampling-note", "value"),
+              State("settle-seconds", "value"), prevent_initial_call=True)
+def change_sampling(_, __, note, seconds):
+    if ctx.triggered_id not in ("pause-analysis", "resume-analysis"):
+        return no_update
+    return monitor.set_sampling(ctx.triggered_id == "pause-analysis", note or "Vessel sampling", seconds or 0)
+
+
+@app.callback(Output("sampling-status", "children"), Input("tick", "n_intervals"))
+def refresh_sampling(_):
+    state = monitor.sampling_status()
+    if state["settling"]:
+        return f"Settling: analysis resumes at {state['resume_at']:%H:%M:%S} (Pi local time)."
+    if state["paused"]:
+        return f"Analysis paused for sampling: {state['reason']}. Raw logging and control remain active."
+    return "Analysis running. Sampling periods remain marked in the archive."
 
 
 @app.callback(Output("controller-status", "children"), Output("save-range", "disabled"),

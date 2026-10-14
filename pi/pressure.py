@@ -7,6 +7,7 @@ import math
 import signal
 import uuid
 import time
+import threading
 
 # Support both python -m pi.NAME and python pi/NAME.py.
 if __package__ in (None, ""):
@@ -16,7 +17,7 @@ if __package__ in (None, ""):
 
 import config
 from pi.bubble_detection import BubbleDetector
-from mqtt_common import connect_and_start, make_client, send, stop_requested
+from mqtt_common import connect_and_start, connected_ok, make_client, read_json, send, stop_requested
 
 log = logging.getLogger("pressure-hardware")
 
@@ -29,12 +30,14 @@ class PressureHardwareClient:
         if self.mode not in ("pressure", "bubble", "both"):
             raise ValueError("Invalid pressure mode")
         self.detector = BubbleDetector()
+        self.relearn_requested = threading.Event()
         self.session = uuid.uuid4().hex
         self.latest_status = {"online": True, "ready": False, "mode": self.mode,
                               "calibrated": self.calibration_enabled()}
         self.client.will_set(config.TOPIC_PRESSURE_STATUS,
             json.dumps({"online": False}), qos=1, retain=True)
         self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
 
     @staticmethod
     def _lgpio():
@@ -129,8 +132,17 @@ class PressureHardwareClient:
         scale = config.PRESSURE_CAL_KPA / (config.PRESSURE_CAL_RAW - config.PRESSURE_ZERO_RAW)
         return (raw - config.PRESSURE_ZERO_RAW) * scale
 
-    def _on_connect(self, *args):
-        send(self.client, config.TOPIC_PRESSURE_STATUS, self.latest_status, retain=True)
+    def _on_connect(self, client, userdata, flags, reason_code, *extra):
+        if connected_ok(reason_code):
+            client.subscribe(getattr(config, "TOPIC_BUBBLE_RESET", f"{config.ROOT}/sensors/bubble/reset"), qos=1)
+            send(self.client, config.TOPIC_PRESSURE_STATUS, self.latest_status, retain=True)
+
+    def _on_message(self, client, userdata, message):
+        data = read_json(message)
+        if (message.topic == getattr(config, "TOPIC_BUBBLE_RESET", f"{config.ROOT}/sensors/bubble/reset") and not getattr(message, "retain", False)
+                and isinstance(data, dict) and data.get("action") == "RELEARN"):
+            # All detector mutation stays on the sample-processing thread.
+            self.relearn_requested.set()
 
     def calculate_drop(self, baseline, raw):
         if config.PRESSURE_DROP_WHEN_RAW_DECREASES:
@@ -160,6 +172,13 @@ class PressureHardwareClient:
         self.gpio = None
 
     def process_sample(self, raw, now, publish=True):
+        if self.relearn_requested.is_set():
+            self.relearn_requested.clear()
+            self.detector.reset()  # preserve session count, relearn operating baseline
+            self.latest_status = {"online": True, "ready": False, "mode": self.mode,
+                                  "calibrated": self.calibration_enabled(), "error": None}
+            send(self.client, config.TOPIC_PRESSURE_STATUS, self.latest_status, retain=True)
+            log.info("Relearning bubble baseline after sampling; count preserved")
         result = self.detector.update(raw, now) if self.mode != "pressure" else None
         if result and result["event"]:
             event = {**result["event"], "session": self.session, "timestamp": time.time()}

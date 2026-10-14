@@ -1,5 +1,7 @@
 """Save sensor readings and fault events in CSV (spreadsheet) files."""
 import csv
+import os
+import tempfile
 from pathlib import Path
 
 
@@ -10,13 +12,51 @@ class DataLogger:
         self.reading_file = Path(reading_file)
         self.fault_file = Path(fault_file)
 
-    def log_reading(self, timestamp, sensor, value):
-        """Add a sensor reading, using a readable date and time."""
-        self._ensure(self.reading_file, ["timestamp", "sensor", "value"])
-        row = [timestamp.isoformat(timespec="seconds"), sensor, value]
-        with self.reading_file.open("a", newline="", encoding="utf-8") as log_file:
-            writer = csv.writer(log_file)
-            writer.writerow(row)
+    def log_reading(self, timestamp, sensor, value, source="sensor", sample_id="", excluded=False):
+        """Preserve old CSV rows while adding analysis metadata to the schema."""
+        header = ["timestamp", "sensor", "value", "source", "sample_id", "excluded"]
+        self._ensure_reading_schema(header)
+        row = [timestamp.isoformat(timespec="milliseconds"), sensor, value, source, sample_id, excluded]
+        with self.reading_file.open("a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow(row)
+
+    def _ensure_reading_schema(self, header):
+        self._ensure(self.reading_file, header)
+        with self.reading_file.open(newline="", encoding="utf-8") as source:
+            reader = csv.DictReader(source)
+            if reader.fieldnames == header:
+                return
+            if not {"timestamp", "sensor", "value"}.issubset(reader.fieldnames or []):
+                raise ValueError("Unknown readings CSV schema; refusing to replace it")
+            with tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8",
+                    dir=self.reading_file.parent, delete=False) as target:
+                tmp = target.name
+                writer = csv.DictWriter(target, header, extrasaction="ignore")
+                writer.writeheader()
+                try:
+                    for row in reader:
+                        writer.writerow({**row, "source": row.get("source") or "unknown",
+                                         "sample_id": row.get("sample_id") or "",
+                                         "excluded": row.get("excluded") or False})
+                    target.flush()
+                    os.fsync(target.fileno())
+                except BaseException:
+                    os.unlink(tmp)
+                    raise
+        os.replace(tmp, self.reading_file)
+
+    def log_sampling_event(self, file, timestamp, event, reason, resume_at=""):
+        path = Path(file)
+        self._ensure(path, ["timestamp", "event", "reason", "resume_at"])
+        with path.open("a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([timestamp.isoformat(timespec="milliseconds"), event,
+                                         reason, resume_at])
+
+    def log_coverage(self, file, timestamp, available):
+        path = Path(file)
+        self._ensure(path, ["timestamp", "available"])
+        with path.open("a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([timestamp.isoformat(timespec="milliseconds"), available])
 
     def log_fault_event(self, timestamp, event):
         """Add a fault change, such as RAISED, ACKNOWLEDGED or CLEARED."""

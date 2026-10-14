@@ -37,8 +37,9 @@ python -m pi.oled
 `python pi/temp.py`, `python pi/pressure.py`, `python pi/peltier.py` and
 `python pi/oled.py` also work. Stop with Ctrl+C or SIGTERM. The actuator starts
 with both outputs low and reports status every 0.5 seconds. Temperature is
-published every 2 seconds. The dashboard defaults to http://127.0.0.1:8050;
-set `DASHBOARD_HOST` explicitly if it should be accessible on your network.
+published every 2 seconds. The dashboard listens on all Pi network interfaces at port 8050. From another
+device on the same network, open `http://<PI_IP_ADDRESS>:8050`. Use `hostname -I`
+on the Pi to find its address.
 
 For a software demo, install `requirements.txt` and run `python dashboard.py
 --demo` against a **separate demo broker**, with the real Pi clients stopped.
@@ -186,3 +187,68 @@ still be verified on the installed hardware.
 
 `control_logic.py` and `fault_handling.py` are legacy pure teaching modules;
 `controller.py` uses `controller_system/` for the live controller.
+
+## Reports and manual pH sampling
+
+The dashboard service logs subscribed live measurements while it is running;
+it does not retrieve historical broker messages. Retained readings are shown
+but are not logged again. Keep the dashboard process running to maintain the
+archive (browser tabs can be closed without stopping the server).
+
+Use **Report generator** to select temperature, pressure, bubble rate and/or pH.
+Choose a preset period or **Custom dates**, with start/end times in the Pi's
+local timezone. The end time includes that minute. Click **Generate / refresh
+report** to read the saved files, or download the corresponding report CSV.
+The report uses separate axes for each unit and pH remains individual dots.
+Large temperature/pressure plots use interval means for display; the CSV export
+preserves the original selected samples. No report values come from live cards.
+
+Bubble events are counted into 1, 5, 15 or 60-minute bins and divided by each
+bin's duration in minutes. Partial boundary bins use their actual duration.
+Confirmed quiet periods give zero; missing pressure hardware coverage and
+excluded sampling periods give gaps, not artificial zeros. Older event archives
+without coverage can show bins with events, but cannot establish quiet periods.
+This is a count rate, not litres of gas or a measured gas flow. Very long ranges
+may require a larger interval to limit the number of points.
+
+**Log a manual pH measurement** accepts values from 0 to 14. The measurement
+time is optional (blank means now); otherwise use `YYYY-MM-DD HH:MM` in the Pi's
+local time. The entry publishes a non-retained JSON object to
+`biodigester/sensors/ph` with `source: "manual"`, measurement time and a unique
+sample ID. The regular MQTT subscriber validates and logs the echoed message.
+Duplicate sample IDs are suppressed, including recent IDs after logger restart.
+The success message confirms publication; the pH card updates when it is received.
+
+Before opening the vessel, click **Pause analysis for sampling**. It marks an
+exclusion period; it does **not** stop raw recording, alarms, or temperature
+control. Manual pH samples are kept for analysis during that period. After
+closing the vessel, choose a settling time (default 60 seconds) and click
+**Resume after settling**. The dashboard requests a fresh bubble baseline via
+`biodigester/sensors/bubble/reset` with `{"action":"RELEARN"}`. The pressure
+client clears its detection state and learns a new baseline while preserving
+the session count; calibration constants remain unchanged. The request is
+non-retained, and the pressure client ignores saved reset commands.
+
+The pause survives dashboard restart and applies to every browser connected to
+that dashboard server. Sampling periods are shaded on report graphs and excluded
+by default. Select **Include sampling periods in analysis** to inspect the raw
+period instead. Relearning and settling are not proof that the physical process
+has recovered; choose a settling duration suitable for the vessel and inspect
+the pressure trace. A dashboard pause is not a physical isolation procedure.
+
+Archive files:
+
+| File | Contents |
+|---|---|
+| `data/readings.csv` | Temperature, calibrated pressure and pH; source, sample ID, exclusion flag |
+| `data/bubble_events.csv` | Individual unique bubble events |
+| `data/bubble_coverage.csv` | Hardware readiness heartbeats and disconnect markers used to distinguish zero from missing data |
+| `data/sampling_events.csv` | Pause, resume, settling deadlines and operator notes |
+| `data/fault_events.csv` | Fault lifecycle events, including during sampling |
+
+The logger upgrades older three-column readings CSVs atomically, preserving
+existing rows. Use one dashboard/logger process per set of archive files;
+multiple browser tabs are fine. Older analysis files and existing calibration
+settings should be kept when installing an update.
+
+See [DASHBOARD_UPDATE.md](DASHBOARD_UPDATE.md) for installing the analysis update while preserving Pi configuration and existing data.
