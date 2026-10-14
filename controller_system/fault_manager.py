@@ -7,6 +7,18 @@ from controller_system.models import FaultCategory, FaultDefinition, FaultState,
 
 
 FAULT_DEFINITIONS = {
+    "PELTIER_POWER_MISMATCH": FaultDefinition(
+        "PELTIER_POWER_MISMATCH", FaultCategory.ACTUATOR, Severity.ERROR,
+        "Reported Peltier power differs from the requested magnitude or direction.",
+        "Force zero output and require inspection and acknowledgement.",
+        inhibit_heating=True, trip_safety=True, latching=True,
+    ),
+    "PELTIER_FEEDBACK_STALE": FaultDefinition(
+        "PELTIER_FEEDBACK_STALE", FaultCategory.ACTUATOR, Severity.ERROR,
+        "No fresh Peltier output report is available.",
+        "Heating is disabled until live actuator feedback returns.",
+        inhibit_heating=True,
+    ),
     "TEMP_SENSOR_NO_DATA": FaultDefinition(
         "TEMP_SENSOR_NO_DATA", FaultCategory.SENSOR, Severity.CRITICAL,
         "No temperature reading has been received.",
@@ -45,19 +57,19 @@ FAULT_DEFINITIONS = {
     "HIGH_HIGH_TEMPERATURE": FaultDefinition(
         "HIGH_HIGH_TEMPERATURE", FaultCategory.PROCESS, Severity.CRITICAL,
         "Digester temperature reached the high-high safety limit.",
-        "Trip the independent heater safety cut-out and require acknowledgement before reset.",
+        "Trip the Peltier software safety latch and require acknowledgement before reset.",
         inhibit_heating=True, trip_safety=True, latching=True,
     ),
     "HEATER_FAILED_TO_SWITCH_ON": FaultDefinition(
         "HEATER_FAILED_TO_SWITCH_ON", FaultCategory.ACTUATOR, Severity.ERROR,
-        "The heater relay did not reach the commanded ON state.",
+        "The Peltier output did not reach the commanded ON state.",
         "Stop the heating attempt and require acknowledgement after the actuator is checked.",
         inhibit_heating=True, latching=True,
     ),
     "HEATER_STUCK_ON": FaultDefinition(
         "HEATER_STUCK_ON", FaultCategory.ACTUATOR, Severity.CRITICAL,
-        "The heater relay remained ON after an OFF command.",
-        "Trip the independent safety cut-out and require acknowledgement before reset.",
+        "The Peltier output remained ON after an OFF command.",
+        "Trip the Peltier software safety latch and require acknowledgement before reset.",
         inhibit_heating=True, trip_safety=True, latching=True,
     ),
     "HEATER_NO_THERMAL_RESPONSE": FaultDefinition(
@@ -68,7 +80,7 @@ FAULT_DEFINITIONS = {
     ),
     "SAFETY_CUTOUT_TRIPPED": FaultDefinition(
         "SAFETY_CUTOUT_TRIPPED", FaultCategory.SYSTEM, Severity.ERROR,
-        "The independent heater safety cut-out is tripped.",
+        "The Peltier software safety latch is tripped.",
         "Heating remains unavailable until the operator acknowledges and requests a safe reset.",
         inhibit_heating=True,
     ),

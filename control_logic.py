@@ -37,13 +37,13 @@ def decide_hysteresis(temp_c, heating, th):
 class Settings:
     """Limits and timers for the Regulator. All times are in seconds."""
     strategy: str = config.STRATEGY
-    stale_after_s: float = config.STALE_AFTER_S
-    plausible_min_c: float = config.PLAUSIBLE_MIN_C
-    plausible_max_c: float = config.PLAUSIBLE_MAX_C
+    stale_after_s: float = config.TEMP_STALE_AFTER_S
+    plausible_min_c: float = config.TEMP_PLAUSIBLE_MIN_C
+    plausible_max_c: float = config.TEMP_PLAUSIBLE_MAX_C
     min_on_s: float = config.MIN_ON_S
     min_off_s: float = config.MIN_OFF_S
     alarm_margin_c: float = config.ALARM_MARGIN_C
-    actuator_timeout_s: float = config.ACTUATOR_TIMEOUT_S
+    actuator_timeout_s: float = config.ACTUATOR_FEEDBACK_TIMEOUT_S
     threshold_min_c: float = config.THRESHOLD_MIN_C
     threshold_max_c: float = config.THRESHOLD_MAX_C
     min_band_c: float = config.MIN_BAND_C
@@ -52,6 +52,8 @@ class Settings:
 # Range validation
 def check_thresholds(low, high, settings):
     """Return None if (low, high) may be used, otherwise a reason to show the user."""
+    if isinstance(low, bool) or isinstance(high, bool):
+        return "Both temperatures must be numbers."
     try:
         low, high = float(low), float(high)
     except (TypeError, ValueError):

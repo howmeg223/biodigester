@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 
 import logging
+import signal
 import math
 import threading
 import time
+# Support both python -m pi.NAME and python pi/NAME.py.
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import config
-from mqtt_common import connect_and_start, connected_ok, make_client, read_json, send
+from mqtt_common import connect_and_start, connected_ok, make_client, read_json, read_power, send, stop_requested
 
 log = logging.getLogger("peltier-hardware")
 
@@ -23,6 +30,8 @@ class PeltierHardwareClient:
         self.watchdog_timed_out = False
         self.safety_latched = False
         self.last_error = None
+        self.output_unknown = False
+        self.stop_event = threading.Event()
         self._configure_mqtt()
 
     @staticmethod
@@ -37,6 +46,9 @@ class PeltierHardwareClient:
         return lgpio
     
     def _configure_mqtt(self):
+        import json
+        self.client.will_set(config.TOPIC_PELTIER_STATE,
+            json.dumps({"online": False}), qos=1, retain=True)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
@@ -47,7 +59,7 @@ class PeltierHardwareClient:
         Open /dev/gpiochip0 and claim the two PWM GPIOs. 
         Both outputs start LOW.
         """
-        lgpio = self._lpgio()
+        lgpio = self._lgpio()
         log.info("Opening /dev/gpiochip%d", config.PELTIER_GPIO_CHIP)
         self.gpio = lgpio.gpiochip_open(config.PELTIER_GPIO_CHIP)
         lgpio.gpio_claim_output(self.gpio, config.PELTIER_RPWM_PIN, 0)
@@ -97,8 +109,17 @@ class PeltierHardwareClient:
         """
         Turn both sides of the H-bridge OFF.
         """
-        self._stop_pwm(config.PELTEIR_RPWM_PIN)
-        self._stop_pwm(config.PELTIER_LPWM_PIN)
+        errors = []
+        for pin in (config.PELTIER_RPWM_PIN, config.PELTIER_LPWM_PIN):
+            try:
+                self._stop_pwm(pin)
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            self.output_unknown = True
+            self.safety_latched = True
+            raise errors[0]
+        self.output_unknown = False
         self.current_direction = 0
         self.applied_power = 0.0
 
@@ -116,7 +137,9 @@ class PeltierHardwareClient:
                 return
             try:
                 self._all_off()
-            except Exception:
+            except Exception as exc:
+                self.last_error = f"Output shutdown failed: {exc}"
+                self.safety_latched = True
                 lgpio = self._lgpio()
                 for pin in (config.PELTIER_RPWM_PIN, config.PELTIER_LPWM_PIN):
                     try:
@@ -143,14 +166,14 @@ class PeltierHardwareClient:
                 except Exception:
                     pass
             try:
-                lgpio.gpio_close(self.gpio)
+                lgpio.gpiochip_close(self.gpio)
             except Exception:
                 pass
             self.gpio = None
 
 
     def set_power(self, command):
-        command = float(command)
+        command = read_power({"power": command})
         if not math.isfinite(command):
             raise ValueError("Peltier command must be finite")
         if command < -100 or command > 100:
@@ -217,6 +240,8 @@ class PeltierHardwareClient:
         else:
             direction = "OFF"
         return {
+            "online": not self.output_unknown,
+            "output_unknown": self.output_unknown,
             "requested_power": round(self.requested_power, 2),
             "applied_power": round(self.applied_power, 2),
             "direction": direction,
@@ -244,11 +269,17 @@ class PeltierHardwareClient:
 
 
     def _on_disconnect(self, *args):
-        self.emergency_off("MQTT disconnected")
+        with self.lock:
+            self.safety_latched = True
+            self.last_command_time = None
+            self.emergency_off("MQTT disconnected")
 
 
 
     def _on_message(self, client, userdata, message):
+        if getattr(message, "retain", False):
+            log.warning("Ignoring saved actuator command on %s", message.topic)
+            return
         data = read_json(message)
         if not isinstance(data, dict):
             log.warning("Ignoring non-JSON MQTT payload on %s", message.topic)
@@ -256,12 +287,11 @@ class PeltierHardwareClient:
 
         try:
             if message.topic == config.TOPIC_PELTIER_CMD:
-                value = float(data["power"])
-                if not math.isfinite(value) or value < -100 or value > 100:
-                    raise ValueError("power must be a finite value from -100 to 100")
-                self.last_command_time = self.clock()
-                self.watchdog_timed_out = False
-                self.set_power(value)
+                value = read_power(data)
+                with self.lock:
+                    self.last_command_time = self.clock()
+                    self.watchdog_timed_out = False
+                    self.set_power(value)
 
             elif message.topic == config.TOPIC_PELTIER_SAFETY_CMD:
                 action = data.get("action")
@@ -272,6 +302,10 @@ class PeltierHardwareClient:
                         self.publish_state()
                 elif action == "RESET":
                     with self.lock:
+                        self._all_off()
+                        self.emergency_off("safety reset: awaiting fresh power command")
+                        self.requested_power = 0.0
+                        self.last_command_time = None
                         self.safety_latched = False
                         self.watchdog_timed_out = False
                         self.last_error = None
@@ -280,6 +314,7 @@ class PeltierHardwareClient:
             log.warning("Invalid Peltier MQTT command %r: %s", data, exc)
         except Exception as exc:
             self.last_error = str(exc)
+            self.safety_latched = True
             log.exception("Error applying Peltier command")
             self.emergency_off("command error")
             self.publish_state()
@@ -290,7 +325,7 @@ class PeltierHardwareClient:
             if self.last_command_time is None or self.safety_latched:
                 return False
             age = self.clock() - self.last_command_time
-            if age <= config.PELTIER_COMMAND_TIMEOUT_S:
+            if config.PELTIER_COMMAND_TIMEOUT_S is None or age <= config.PELTIER_COMMAND_TIMEOUT_S:
                 return False
             if not self.watchdog_timed_out:
                 self.watchdog_timed_out = True
@@ -303,25 +338,34 @@ class PeltierHardwareClient:
             return False
 
     def _watchdog_loop(self):
-        while True:
-            time.sleep(0.5)
-            self.watchdog_step()
+        while not self.stop_event.wait(0.5):
+            try:
+                self.watchdog_step()
+                with self.lock:
+                    self.publish_state()
+            except Exception:
+                log.exception("Peltier watchdog/state error")
+                with self.lock:
+                    self.safety_latched = True
+                    self.emergency_off("watchdog error")
 
     def run(self):
-        self.setup_gpio()
-        connect_and_start(self.client, "peltier-hardware")
-        thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="peltier-watchdog")
-        thread.start()
-        log.info("Peltier hardware client running; command range -100 to +100%%")
+        thread = None
         try:
+            self.setup_gpio()
+            connect_and_start(self.client, "peltier-hardware")
+            thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="peltier-watchdog")
+            thread.start()
             while True:
                 time.sleep(1)
         finally:
-            try:
-                self.client.disconnect()
-                self.client.loop_stop()
-            finally:
-                self.cleanup_gpio()
+            self.stop_event.set()
+            if thread:
+                thread.join(timeout=2)
+            self.cleanup_gpio()
+            send(self.client, config.TOPIC_PELTIER_STATE, {"online": False}, retain=True)
+            self.client.disconnect()
+            self.client.loop_stop()
 
 
 def main():
@@ -330,6 +374,7 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    signal.signal(signal.SIGTERM, stop_requested)
     client = PeltierHardwareClient()
     client.run()
 
@@ -341,3 +386,4 @@ if __name__ == "__main__":
         log.info("Stopped by user")
     except Exception:
         log.exception("Fatal error")
+        raise

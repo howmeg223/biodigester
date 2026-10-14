@@ -25,6 +25,8 @@ class ControlDecision:
 
 def check_thresholds(low, high):
     """Return an error message for an invalid range, otherwise return None."""
+    if isinstance(low, bool) or isinstance(high, bool):
+        return "Both temperatures must be numbers."
     try:
         low = float(low)
         high = float(high)

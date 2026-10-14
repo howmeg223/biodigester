@@ -42,3 +42,11 @@ class DataLogger:
         if not path.exists() or path.stat().st_size == 0:
             with path.open("w", newline="", encoding="utf-8") as log_file:
                 csv.writer(log_file).writerow(header)
+
+    def log_bubble_event(self, file, timestamp, event):
+        path = Path(file)
+        keys = ("session", "count", "raw", "baseline", "drop", "threshold", "hold_seconds")
+        self._ensure(path, ["timestamp", *keys])
+        with path.open("a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([timestamp.isoformat(timespec="milliseconds"),
+                                         *(event.get(key, "") for key in keys)])

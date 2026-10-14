@@ -7,12 +7,12 @@ from unittest.mock import Mock
 import pytest
 
 import config
-from dashboard import Monitor
+from monitoring.monitoring_service import MonitoringService
 
 
 @pytest.fixture
 def monitor(tmp_path):
-    return Monitor(tmp_path / "data" / "readings.csv")
+    return MonitoringService(tmp_path / "data" / "readings.csv")
 
 
 def receive(monitor, topic, data, retained=False):
@@ -22,7 +22,7 @@ def receive(monitor, topic, data, retained=False):
 def test_project_sensor_payloads_and_archive_numeric_format(monitor):
     receive(monitor, config.TOPIC_TEMPERATURE, {"temperature": 36.42})
     receive(monitor, config.SENSORS["pressure"]["topic"], {"pressure": 2.43})
-    receive(monitor, config.SENSORS["ph"]["topic"], 7.02)
+    receive(monitor, config.SENSORS["ph"]["topic"], {"ph": 7.02})
     with monitor.log_file.open() as f:
         rows = list(csv.DictReader(f))
     assert [(r["sensor"], float(r["value"])) for r in rows] == [
@@ -51,7 +51,7 @@ def test_retained_and_stale_controller_cannot_look_live(monitor, monkeypatch):
     receive(monitor, config.TOPIC_STATUS, {"mode": "HEATING", "heating": True})
     assert monitor.controller_status()["mode"] == "HEATING"
     received = monitor.messages[config.TOPIC_STATUS][1]
-    monkeypatch.setattr("dashboard.time.monotonic", lambda: received + config.STALE_AFTER_S + 1)
+    monkeypatch.setattr("dashboard.time.monotonic", lambda: received + config.TEMP_STALE_AFTER_S + 1)
     assert monitor.controller_status()["mode"] == "OFFLINE"
 
 
@@ -95,21 +95,20 @@ def test_offline_range_and_disabled_faults_do_not_publish(monitor, monkeypatch):
     monitor.client = Client()
     assert "live controller" in monitor.set_range(35, 37)
     monkeypatch.setattr(config, "SHOW_SIM_PANEL", False)
-    assert "disabled" in monitor.set_fault("sensor_dropout")
+    assert "disabled" in monitor.set_fault("temp_sensor_dropout")
     assert not monitor.client.sent
 
 
 def test_fault_commands_are_not_retained(monitor):
     monitor.client = Client()
-    assert "sent" in monitor.set_fault("sensor_dropout")
-    assert monitor.client.sent == [(config.TOPIC_SIM_FAULT, {"fault": "sensor_dropout"}, 1, False)]
+    assert "sent" in monitor.set_fault("temp_sensor_dropout")
+    assert monitor.client.sent == [(config.TOPIC_SIM_FAULT, {"fault": "temp_sensor_dropout"}, 1, False)]
 
 
 def test_browser_layout_callbacks_and_report_use_project_messages(monitor, monkeypatch):
     import dashboard
     monkeypatch.setattr(dashboard, "monitor", monitor)
     monkeypatch.setattr(dashboard, "lock", monitor.lock)
-    monkeypatch.setattr(dashboard, "LOG_FILE", monitor.log_file)
     http = dashboard.app.server.test_client()
     for url in ("/", "/_dash-layout", "/_dash-dependencies"):
         assert http.get(url).status_code == 200
@@ -123,7 +122,7 @@ def test_browser_layout_callbacks_and_report_use_project_messages(monitor, monke
     assert values[0] == "36.42 °C"
     assert "updated" in stamps[0]
     assert "Connected" in connection
-    children, disabled, _ = dashboard.refresh_controller(0)
+    children, disabled, _, _, _ = dashboard.refresh_controller(0)
     assert disabled is False
     assert any(getattr(child, "children", "") == "Range set to 35 to 37 °C." for child in children)
     history = dashboard.history_fig("temperature", None)

@@ -26,41 +26,28 @@ from fault_handling import (
     FaultHandler, HEATER_NOT_RESPONDING, NO_READING, SENSOR_BAD_VALUE,
     SENSOR_STALE, TEMP_HIGH, TEMP_LOW,
 )
-from simulator import DigesterModel
+from simulation.digester_model import DigesterModel
 
 
-def test_simulator_publishes_all_demo_sensors_and_heater_feedback(monkeypatch):
-    """One simulator cycle supplies the dashboard without a separate publisher."""
+def test_simulator_publishes_all_demo_sensors_and_peltier_feedback(monkeypatch):
     import json
+    from unittest.mock import Mock
     from types import SimpleNamespace
-    import simulator
     import config
-
-    client = SimpleNamespace(loop_stop=lambda: None, disconnect=lambda: None)
-    messages = {}
-
-    def connect(client, name):
-        # A controller command turns the simulated heater on before the cycle.
-        client.on_message(client, None, SimpleNamespace(
-            topic=config.TOPIC_HEATER_CMD, payload=json.dumps({"action": "ON"}).encode()))
-
-    def sleep(seconds):
-        if messages:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(simulator, "make_client", lambda name: client)
-    monkeypatch.setattr(simulator, "connect_and_start", connect)
-    monkeypatch.setattr(simulator, "send", lambda client, topic, data, **kwargs: messages.update({topic: data}))
-    monkeypatch.setattr(simulator.time, "monotonic", lambda: 0)
-    monkeypatch.setattr(simulator.time, "sleep", sleep)
-    monkeypatch.setattr(simulator.random, "gauss", lambda mean, spread: 0)
-    monkeypatch.setattr("sys.argv", ["simulator.py", "--start", "28"])
-    simulator.main()
-
+    from simulation.simulator_service import SimulatorService
+    client = Mock()
+    client.is_connected.return_value = True
+    sim = SimulatorService(client, start_c=28)
+    monkeypatch.setattr("simulation.devices.random.gauss", lambda *_: 0)
+    sim._on_message(client, None, SimpleNamespace(topic=config.TOPIC_PELTIER_CMD,
+                    payload=b'{"power":100}', retain=False))
+    sim.publish_readings(14)
+    sim.publish_ph_if_due(0)
+    messages = {c.args[0]: json.loads(c.args[1]) for c in client.publish.call_args_list}
     assert messages[config.TOPIC_TEMPERATURE] == {"temperature": 28.0}
-    assert messages[config.SENSORS["pressure"]["topic"]] == {"pressure": 2.0}
-    assert messages[config.SENSORS["ph"]["topic"]] == {"ph": 7.0}
-    assert messages[config.TOPIC_HEATER_STATE] == {"state": "ON"}
+    assert messages[config.TOPIC_PRESSURE] == {"pressure": 2.0}
+    assert messages[config.TOPIC_PH]["simulated"] is True
+    assert messages[config.TOPIC_PELTIER_STATE]["applied_power"] == 100
 
 BAND = Thresholds(low=35.0, high=37.0)
 ON, OFF = True, False
@@ -386,7 +373,7 @@ def run_closed_loop(hours, sensor_fails_between=None, ambient_c=14.0):
             last_reading, last_reading_time = model.temp_c, now
         age = None if last_reading_time is None else now - last_reading_time
         decision = reg.update(now, last_reading, age)
-        model.step(step_s, decision.heating, ambient_c)
+        model.step(step_s, model.heater_w if decision.heating else 0.0, ambient_c)
         log.append((now, model.temp_c, decision.heating))
     return log
 

@@ -88,8 +88,10 @@ def test_mqtt_callbacks_subscribe_receive_and_disconnect(monitor, monkeypatch):
     monitor.start()
     client.on_connect(client, None, None, 0)
     expected_topics = set(monitor.sensor_topics) | {
-        config.TOPIC_STATUS, config.TOPIC_HEATER_STATE, config.TOPIC_FAULT_STATE,
-        config.TOPIC_FAULT_EVENT, config.TOPIC_SIM_STATE,
+        config.TOPIC_STATUS, config.TOPIC_PELTIER_STATE, config.TOPIC_FAULT_STATE,
+        config.TOPIC_FAULT_EVENT, config.TOPIC_SIM_STATE, config.TOPIC_BUBBLE,
+        config.TOPIC_BUBBLE_EVENT, config.TOPIC_PRESSURE_STATUS, config.TOPIC_PRESSURE_RAW,
+        config.TOPIC_PRESSURE_DROP, config.TOPIC_PRESSURE_THRESHOLD,
     }
     assert {call.args[0] for call in client.subscribe.call_args_list} == expected_topics
     assert monitor.connected
@@ -167,6 +169,8 @@ def test_temperature_rule_holds_in_band_but_safety_overrides_timer():
 
 def test_controller_heats_then_stops_on_sensor_failure():
     controller = BiodigesterController(mqtt_client(), clock=lambda: 0)
+    controller.feedback_received_at = 0
+    controller.heater_relay_on = False
     controller.temperature_sensor.add_reading(34, 0)
     assert controller.step()["mode"] == "HEATING"
     controller.temperature_sensor.add_reading(float("nan"), 0)

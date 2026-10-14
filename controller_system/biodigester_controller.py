@@ -10,7 +10,7 @@ from controller_system.heater_monitor import HeaterMonitor
 from controller_system.process_monitor import ProcessMonitor
 from controller_system.sensor_monitor import TemperatureSensorMonitor
 from controller_system.temperature_control import TemperatureController
-from mqtt_common import connected_ok, read_json, send
+from mqtt_common import connected_ok, read_json, read_power, send
 
 
 class BiodigesterController:
@@ -25,6 +25,9 @@ class BiodigesterController:
         self.faults = FaultManager()
         self.temperature_control = TemperatureController(strategy=strategy)
         self.heater_relay_on = None
+        self.feedback_received_at = None
+        self.started_at = self.clock()
+        self.applied_power = 0.0
         self.safety_cutout = False
         self.note = ""
         self.note_id = 0
@@ -44,11 +47,12 @@ class BiodigesterController:
         )
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
+        self.client.on_disconnect = self._on_disconnect
 
     def _on_connect(self, client, userdata, flags, reason_code, *extra):
         if connected_ok(reason_code):
             for topic in (config.TOPIC_TEMPERATURE, config.TOPIC_THRESHOLDS,
-                          config.TOPIC_HEATER_STATE, config.TOPIC_FAULT_ACK):
+                          config.TOPIC_PELTIER_STATE, config.TOPIC_FAULT_ACK):
                 client.subscribe(topic, qos=1)
             print("[controller] Connected to the broker.")
 
@@ -57,17 +61,32 @@ class BiodigesterController:
         now = self.clock()
         with self.lock:
             if msg.topic == config.TOPIC_TEMPERATURE:
+                if getattr(msg, "retain", False):
+                    return
                 value = self._read_number(data, "temperature")
                 self.temperature_sensor.add_reading(value, now)
-            elif msg.topic == config.TOPIC_HEATER_STATE and isinstance(data, dict):
-                relay = data.get("relay_state")
-                if relay in ("ON", "OFF"):
-                    self.heater_relay_on = relay == "ON"
-                self.safety_cutout = bool(data.get("safety_cutout", False))
+            elif msg.topic == config.TOPIC_PELTIER_STATE and isinstance(data, dict):
+                if getattr(msg, "retain", False):
+                    return
+                if data.get("online") is False:
+                    self.feedback_received_at = None
+                    return
+                try:
+                    power = read_power(data, "applied_power")
+                    if not isinstance(data.get("safety_latched"), bool):
+                        return
+                except ValueError:
+                    return
+                self.applied_power = power
+                self.heater_relay_on = abs(power) >= config.PELTIER_DEADBAND_PERCENT
+                self.feedback_received_at = now
+                self.safety_cutout = data["safety_latched"]
             elif msg.topic == config.TOPIC_THRESHOLDS:
                 self._handle_threshold_request(data)
             elif msg.topic == config.TOPIC_FAULT_ACK and isinstance(data, dict):
                 code = data.get("code", "ALL")
+                if not isinstance(code, str):
+                    return
                 acknowledged = self.faults.acknowledge(code, now)
                 if acknowledged:
                     self._reset_requested = True
@@ -90,6 +109,8 @@ class BiodigesterController:
     @staticmethod
     def _read_number(data, key):
         try:
+            if isinstance(data[key], bool):
+                return math.nan
             value = float(data[key])
         except (TypeError, KeyError, ValueError, OverflowError):
             return math.nan
@@ -99,6 +120,10 @@ class BiodigesterController:
         """Check the equipment, choose a heater command and publish the results."""
         now = self.clock()
         with self.lock:
+            feedback_fresh = (self.feedback_received_at is not None and
+                              now - self.feedback_received_at <= config.ACTUATOR_FEEDBACK_TIMEOUT_S)
+            self.faults.update_condition("PELTIER_FEEDBACK_STALE",
+                not feedback_fresh and now - self.started_at >= config.ACTUATOR_FEEDBACK_TIMEOUT_S, now)
             # 1. Check the sensor, process and heater. Heater checks use the
             # command from the previous cycle so the hardware has time to respond.
             sensor_health = self.temperature_sensor.evaluate(
@@ -113,32 +138,36 @@ class BiodigesterController:
             heater_conditions = self.heater_monitor.evaluate(
                 now=now,
                 commanded_on=self.temperature_control.heating,
-                relay_reported_on=self.heater_relay_on,
+                relay_reported_on=self.heater_relay_on if feedback_fresh else None,
                 temperature_c=sensor_health.value,
                 temperature_trustworthy=sensor_health.trustworthy,
                 safety_cutout=self.safety_cutout,
+                commanded_power=config.PELTIER_HEAT_POWER if self.temperature_control.heating else 0.0,
+                applied_power=self.applied_power if feedback_fresh else None,
             )
             for code, condition in heater_conditions.items():
                 self.faults.update_condition(code, condition, now)
 
-            # 2. Trip or reset the independent safety cut-out when required.
+            # 2. Trip or reset the Peltier software safety latch when required.
             if self.faults.safety_trip_required():
-                send(self.client, config.TOPIC_SAFETY_CMD, {"action": "TRIP"})
+                send(self.client, config.TOPIC_PELTIER_SAFETY_CMD, {"action": "TRIP"})
                 self._reset_requested = False
-            elif self._reset_requested:
+            elif self._reset_requested and sensor_health.trustworthy and not any(
+                    f["inhibit_heating"] and f["code"] != "SAFETY_CUTOUT_TRIPPED"
+                    for f in self.faults.active_faults()):
                 # A reset is only attempted after acknowledgement and once no
-                # active fault still requires the independent safety trip.
-                send(self.client, config.TOPIC_SAFETY_CMD, {"action": "RESET"})
+                # active fault still requires the software safety trip.
+                send(self.client, config.TOPIC_PELTIER_SAFETY_CMD, {"action": "RESET"})
                 self._reset_requested = False
 
             # 3. Apply normal control only if the fault manager allows heating.
             decision = self.temperature_control.update(
                 now,
                 sensor_health.value,
-                heating_allowed=not self.faults.heating_inhibited(),
+                heating_allowed=feedback_fresh and not self.faults.heating_inhibited(),
             )
-            send(self.client, config.TOPIC_HEATER_CMD,
-                 {"action": "ON" if decision.heating else "OFF"})
+            send(self.client, config.TOPIC_PELTIER_CMD,
+                 {"power": config.PELTIER_HEAT_POWER if decision.heating else 0.0})
 
             # 4. Tell the dashboard about fault changes and the current state.
             events = self.faults.pop_events()
@@ -157,6 +186,7 @@ class BiodigesterController:
             status = {
                 "mode": mode,
                 "heating": decision.heating,
+                "commanded_power": config.PELTIER_HEAT_POWER if decision.heating else 0.0,
                 "reason": decision.reason,
                 "temperature": sensor_health.value,
                 "temperature_age_s": sensor_health.age_s,
@@ -182,10 +212,16 @@ class BiodigesterController:
                       f"faults={fault_text}")
             return status
 
+    def _on_disconnect(self, *args):
+        with self.lock:
+            self.feedback_received_at = None
+            self.temperature_sensor.received_at = None
+            self.temperature_control.update(self.clock(), None, heating_allowed=False)
+
     def shutdown(self):
         print("\n[controller] Stopping: normal heater command OFF.")
         if self.client.is_connected():
-            self.client.publish(config.TOPIC_HEATER_CMD, json.dumps({"action": "OFF"}), qos=1)
+            self.client.publish(config.TOPIC_PELTIER_CMD, json.dumps({"power": 0.0}), qos=1)
             last = self.client.publish(
                 config.TOPIC_STATUS,
                 json.dumps({"mode": "OFFLINE", "heating": False,

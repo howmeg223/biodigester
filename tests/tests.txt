@@ -1,39 +1,16 @@
-The tests folder checks the control rules and how the components work together.
+Run python -m pip install -r requirements-test.txt, then python -m pytest -q.
 
-test_current_services:
-- checks the current controller_system, monitoring and simulation modules
-- checks sensor validation, retained readings and CSV logging
-- checks fault notifications, acknowledgement and latching behaviour
-- checks MQTT callbacks and dashboard requests without a real broker
-- checks normal heating and fault-driven shutdown in the current controller
-- run with: .venv/bin/python -m pytest -q tests/test_current_services.py
+All tests use the current JSON MQTT interfaces. test_control_logic also preserves
+coverage of the legacy pure Regulator used for teaching, with explicit watts
+passed to the thermal model.
 
-test_control_logic:
-- tests the older control_logic.py and fault_handling.py implementation
-- covers temperature boundaries, timers, validation and simulated heating
-- still imports old configuration names and simulator interfaces
-- needs migration before it can run against the current folder structure
+- test_current_services: faults, readings, callbacks, dashboard and simulation
+- test_control_logic: boundaries, timers, faults and closed-loop thermal behavior
+- test_monitoring: CSV, retained/stale data, ranges, callbacks and demo cleanup
+- test_ph_monitoring: pH validation, notification-only limits and sample timing
+- test_hardware: GPIO mocks, ADC clocks, calibration, pressure modes, bubbles,
+  bridge reversal, watchdog/latch/reset and SH1106 OLED construction/rendering
+- test_end_to_end: real MQTT via a private ephemeral local broker, never the
+  production broker. Skipped if optional amqtt dependency is unavailable.
 
-test_monitoring:
-- tests the older dashboard Monitor class and its MQTT message formats
-- covers logging, history, range requests and demo process cleanup
-- still expects Monitor, a pH demo sensor and old fault names
-- needs migration to MonitoringService and the current message formats
-
-test_end_to_end:
-- starts controller and simulator processes and communicates over real MQTT
-- requires a broker and skips if it is unavailable or a simulator is publishing
-- still expects the older fault names and heater payload format
-- needs migration before it can validate the current services
-
-Suggested reading order:
-test_current_services, then the older tests when updating their interfaces.
-
-Useful terms:
-- assertion: a statement describing the result a test expects
-- fixture: reusable test setup, such as a temporary log directory
-- mock: a stand-in for a real object, such as an MQTT client
-- integration test: a check that several components work together
-
-The full test command is .venv/bin/python -m pytest -q. The older tests currently
-prevent collection, so use the focused command above for the current modules.
+No test controls real Pi GPIO. Hardware acceptance checks are in HARDWARE.md.

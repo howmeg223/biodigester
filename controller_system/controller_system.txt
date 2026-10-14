@@ -19,10 +19,10 @@ fault_manager:
 - reports whether heating must stop or the safety cut-out must trip
 
 heater_monitor:
-- compares the previous heater command with the reported relay state
+- compares the previous heater command with the reported PWM state
 - detects a heater that fails to turn on or stays on after an OFF command
 - checks whether temperature rises while the heater reports ON
-- reports whether the independent safety cut-out is tripped
+- reports whether the software safety latch is tripped
 
 models:
 - defines fault categories and severity levels
@@ -58,4 +58,6 @@ Useful terms:
 - stale: a reading that is too old to use
 - acknowledged: the operator has marked a fault as seen
 - latching: a fault stays active after its cause disappears until acknowledged
-- safety cut-out: a separate switch that removes heater power
+- safety cut-out: a software latch; independent power isolation requires additional hardware
+
+See ../README.md and ../HARDWARE.md for the current signed Peltier MQTT contracts, pressure/bubble modes, and wiring.

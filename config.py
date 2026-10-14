@@ -24,10 +24,10 @@ TOPIC_PH = f"{ROOT}/sensors/ph"
 
 
 # This is where the heater commands sit:
-TOPIC_PELTIET_CMD =f"{ROOT}/peltier/cmd"
-TOPIC_PELTIET_STATE =f"{ROOT}/peltier/state"
+TOPIC_PELTIER_CMD =f"{ROOT}/peltier/cmd"
+TOPIC_PELTIER_STATE =f"{ROOT}/peltier/state"
 # safety latch:
-TOPIC_PELTEIR_SAFETY = f"{ROOT}/peltier/safety"
+TOPIC_PELTIER_SAFETY_CMD = f"{ROOT}/peltier/safety"
 
 
 # Controller topics:
@@ -106,7 +106,7 @@ PELTIER_IDLE_POWER = 0.0
 TEMP_STALE_AFTER_S = 10.0
 TEMP_PLAUSIBLE_MIN_C = 0.0
 TEMP_PLAUSIBLE_MAX_C = 70.0
-TEMP_STUCK_WINDOW_S = 12.0
+TEMP_STUCK_WINDOW_S = 600.0
 TEMP_STUCK_MAX_SPAN_C = 0.02
 
 # ---------------------------------------------------------- Process protection
@@ -117,10 +117,8 @@ HIGH_HIGH_TEMP_C = 42.0
 
 # ---------------------------------------------------------- Heater diagnostics
 ACTUATOR_FEEDBACK_TIMEOUT_S = 5.0
-PELTIER_RESPONSE_WINDOW_S = 12.0
+PELTIER_RESPONSE_WINDOW_S = 600.0
 PELTIER_MIN_RISE_C = 0.08
-PELTIER_COMMAND_TIMEOUT_S = 10.0
-
 # ------------------------------------------------------------------- Simulator
 SIM_SPEED = 60.0
 SENSOR_PERIOD_S = 1.0
@@ -154,3 +152,51 @@ DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 8050
 APP_HISTORY_S = 300
 SHOW_SIM_PANEL = True
+
+# Hardware pin numbers below are BCM GPIO numbers, not header pin numbers.
+# DS18B20 is configured by Linux's dtoverlay=w1-gpio (default BCM4).
+TEMP_GPIO_PIN = 4
+PRESSURE_GPIO_CHIP = 0
+PRESSURE_SCK_PIN = 23
+PRESSURE_OUT_PIN = 24
+PRESSURE_READ_TIMEOUT = 1.0
+PRESSURE_EXTRA_CLOCKS = 3  # 27 clocks: differential input, 40 Hz
+PRESSURE_MODE = "both"  # "pressure", "bubble", or "both"; CLI can override
+PRESSURE_ZERO_RAW = 1339145
+PRESSURE_CAL_RAW = None  # raw reading at a known non-zero gauge pressure
+PRESSURE_CAL_KPA = None  # that known gauge pressure in kPa
+PRESSURE_WARMUP_SAMPLES = 80
+PRESSURE_MIN_DROP_COUNTS = 10000
+PRESSURE_NOISE_MULTIPLIER = 6.0
+PRESSURE_DROP_HOLD_SECONDS = 0.150
+PRESSURE_RELEASE_THRESHOLD_RATIO = 0.40
+PRESSURE_CLEAR_HOLD_SECONDS = 0.250
+PRESSURE_BASELINE_ALPHA = 0.002
+PRESSURE_NOISE_ALPHA = 0.01
+PRESSURE_TELEMETRY_INTERVAL_S = 0.2
+PRESSURE_DROP_WHEN_RAW_DECREASES = True
+PRESSURE_STALE_AFTER_S = 5.0
+TOPIC_PRESSURE_RAW = f"{ROOT}/diagnostics/pressure/raw"
+TOPIC_PRESSURE_DROP = f"{ROOT}/diagnostics/pressure/drop"
+TOPIC_PRESSURE_THRESHOLD = f"{ROOT}/diagnostics/pressure/threshold"
+TOPIC_PRESSURE_STATUS = f"{ROOT}/sensors/pressure/status"
+TOPIC_BUBBLE = f"{ROOT}/sensors/bubble"
+TOPIC_BUBBLE_EVENT = f"{ROOT}/events/bubble"
+BUBBLE_LOG_FILE = DATA_DIR / "bubble_events.csv"
+
+# Jaycar XC3728: SH1106, 128x64, four-wire SPI.
+# DC deliberately avoids BCM24 already used by HX710B.
+OLED_DRIVER = "sh1106"
+OLED_INTERFACE = "spi"  # "i2c" only if the module was configured for I2C
+OLED_SPI_PORT = 0
+OLED_SPI_DEVICE = 0
+OLED_DC_PIN = 25
+OLED_RESET_PIN = 27
+OLED_GPIO_CHIP = 0
+OLED_I2C_PORT = 1
+OLED_I2C_ADDRESS = 0x3C
+OLED_ROTATE = 0  # 0, 1, 2, 3 quarter turns
+OLED_REFRESH_S = 1.0
+
+# Legacy pure Regulator settings (not used by controller.py).
+ALARM_MARGIN_C = 2.0

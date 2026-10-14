@@ -1,179 +1,188 @@
-# Biodigester monitor
+# Biodigester controller and Raspberry Pi hardware
 
-A browser app for temperature, gas pressure and intermittent pH, with live readings, history,
-reports, heater status, alarms and temperature range controls.
-pH is monitoring-only and never affects heater control.
+The Pi reads a DS18B20 temperature probe and an HX710B pressure module, drives a
+BTS7960 Peltier H-bridge, and can show live status on a Jaycar XC3728 OLED.
+The controller makes temperature decisions locally. The browser and OLED monitor
+those decisions; neither is needed for the control loop to run.
 
-## Set up once
+## Install and run
 
-Run these commands from this folder (Python 3.10 or newer):
+Use Python 3.10 or later. On Raspberry Pi OS, install Mosquitto and enable 1-Wire
+and SPI with `sudo raspi-config`, then reboot. The normal 1-Wire overlay uses
+GPIO4. If your working probe uses a different overlay pin, keep that overlay;
+`temp.py` reads Linux sysfs and does not change the 1-Wire pin itself.
 
 ```bash
-brew install mosquitto
+sudo apt install mosquitto mosquitto-clients python3-venv python3-dev build-essential swig
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-pi.txt
 ```
 
-## Run the demo
+Your user needs access to `/dev/gpiochip0` and `/dev/spidev0.0` (normally the
+`gpio` and `spi` groups). Select the appropriate GPIO chip in `config.py` if your
+OS enumerates it differently. Configure MQTT credentials there if required.
+
+From the repository root, start each process in its own terminal:
 
 ```bash
-source .venv/bin/activate
-brew services start mosquitto
-python dashboard.py --demo
-```
-
-Open **http://localhost:8050**. The dashboard starts the controller and simulator
-for you. Press **Ctrl+C** to stop all three. Stop any separately running
-controller or simulator before starting this demo.
-
-Temperature responds to the heater. Pressure readings are simulated display
-examples. The simulator runs 60 times faster than real time; its tank values
-are placeholders.
-
-## How it works
-
-- Below 35 °C: request heating. Above 37 °C: request OFF.
-- Inside the range, including its boundaries: keep the previous heater state.
-- Minimum on/off times delay normal switches. Missing, stale, invalid or frozen
-  temperature readings force heating off; process alarms can also stop heating.
-- High-high temperature and a stuck heater relay trip an independent safety
-  cut-out. Latching faults require acknowledgement after their cause clears.
-- The simulated heater trips its safety cut-out if controller commands stop arriving.
-
-Click a sensor card for its history. Use **Report** to compare sensors and choose
-a time range. **Save range** validates a request; the active range and controller
-reply show its result. Simulator buttons let you silence or freeze the temperature
-sensor, send a bad reading, break the heater or clear the injected scenario.
-Clearing a scenario does not acknowledge faults or reset the safety cut-out; use
-the acknowledgement button to request a safe reset.
-
-Live readings are saved in `data/readings.csv`. Saved MQTT readings are labelled
-and not logged again; silent sensors are labelled stale. The dashboard waits for
-a live controller update before allowing range changes.
-Fault changes are saved in `data/fault_events.csv`.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `dashboard.py` | Browser layout, charts and callbacks that use the monitoring service |
-| `controller.py` | Starts the controller and runs its control loop |
-| `controller_system/` | Sensor checks, process alarms, heater diagnostics, fault tracking and heating rules |
-| `monitoring/` | MQTT reception, CSV logging and recent fault notifications |
-| `simulator.py` | Starts the simulated hardware |
-| `simulation/` | Tank temperature model, simulated devices and test-fault scenarios |
-| `config.py` | Broker address, temperature limits and simulation settings |
-| `mqtt_common.py` | Shared MQTT connection and message helpers |
-| `data/` | Generated sensor and fault-event CSV logs |
-| `tests/` | Current service checks plus older tests awaiting migration |
-| `control_logic.py`, `fault_handling.py` | Older implementation; unused by the current entry points |
-
-Start reading `config.py`, then `controller_system/temperature_control.py`, then
-`controller_system/biodigester_controller.py`. Each project subfolder has a text
-guide with file responsibilities, suggested reading order and useful terms:
-
-- [Controller guide](controller_system/controller_system.txt)
-- [Monitoring guide](monitoring/monitoring.txt)
-- [Simulation guide](simulation/simulation.txt)
-- [Data guide](data/data.txt)
-- [Tests guide](tests/tests.txt)
-
-The sensor, process and heater monitors report fault conditions. `FaultManager`
-tracks those faults and whether heating is allowed. `TemperatureController`
-chooses the normal heater command. `BiodigesterController` coordinates these
-steps and sends the results over MQTT.
-
-MQTT is the message delivery service; its broker passes JSON messages between
-programs using addresses called topics. `with lock:` protects shared values
-while MQTT receives messages in the background.
-
-## Run components separately or connect hardware
-
-Use separate terminals, each with `.venv` activated:
-
-```bash
-python simulator.py
+python -m pi.temp
+python -m pi.pressure --mode both
+python -m pi.peltier
 python controller.py
 python dashboard.py
+python -m pi.oled
 ```
 
-Here the dashboard starts only itself. Closing it leaves the independent
-controller running. For hardware, replace the simulator with your sensor/heater
-program, set the broker address and operating settings in `config.py`, and set
-`SHOW_SIM_PANEL = False`. Review simulation values and timers for your real tank.
-Run one controller and one dashboard process at a time. The browser server
-listens on this computer only by default.
+`python pi/temp.py`, `python pi/pressure.py`, `python pi/peltier.py` and
+`python pi/oled.py` also work. Stop with Ctrl+C or SIGTERM. The actuator starts
+with both outputs low and reports status every 0.5 seconds. Temperature is
+published every 2 seconds. The dashboard defaults to http://127.0.0.1:8050;
+set `DASHBOARD_HOST` explicitly if it should be accessible on your network.
 
-Sensor messages are JSON objects such as `{"temperature": 36.42}` on
-`biodigester/sensors/temperature`, `{"pressure": 2.43}` on
-`biodigester/sensors/pressure`, and `{"ph": 5.2, "valid": true}` on
-`biodigester/sensors/ph` for a valid probe measurement.
-The heater receives `{"action": "ON"}` or `{"action": "OFF"}` on
-`biodigester/heater/cmd`. It reports relay state, safety cut-out state and effective
-power on `biodigester/heater/state`, for example
-`{"relay_state": "ON", "safety_cutout": false, "effective_power": "ON"}`.
-It must enforce `HEATER_COMMAND_TIMEOUT_S` and accept `TRIP`/`RESET` actions on
-`biodigester/heater/safety/cmd`.
-Heater commands are sent fresh each cycle; status and range messages are retained.
+For a software demo, install `requirements.txt` and run `python dashboard.py
+--demo` against a **separate demo broker**, with the real Pi clients stopped.
+The simulator uses the same topics as the hardware. Do not run both publishers
+or both actuator services against the same broker. Simulation includes pH
+samples; no physical pH sensor driver is included.
 
-## Check the code
+## Wiring
+
+See [HARDWARE.md](HARDWARE.md) for the full wiring table, OLED configuration,
+calibration, and initial checks. Previous pressure GPIO23/24 and bridge
+GPIO18/19 assignments are retained. The repository never recorded the probe's
+actual 1-Wire pin; GPIO4 is the Linux default documented here.
+
+## Choose pressure, bubbles, or both
+
+Set `PRESSURE_MODE` in `config.py`, or override it when starting:
 
 ```bash
-python -m pytest -q tests/test_current_services.py tests/test_ph_monitoring.py
+python -m pi.pressure --mode pressure
+python -m pi.pressure --mode bubble
+python -m pi.pressure --mode both
 ```
 
-These checks exercise the current services without hardware or a broker.
-The older `test_control_logic.py` and `test_monitoring.py` still import removed
-interfaces, so the full test suite currently fails during collection. The older
-live MQTT tests also need updated fault names and heater payloads before use.
+Run **one** pressure process at a time.
 
-If the app shows no readings, check that Mosquitto is running. If it waits for
-the controller, use `--demo` or start `controller.py` separately.
+- `pressure`: raw diagnostics plus calibrated kPa; no bubble detection.
+- `bubble`: pressure-drop detection and events; no kPa publication.
+- `both`: both outputs from the same samples. This is the default.
 
-## pH monitoring update
+Pressure is monitoring-only; there is no configured pressure trip limit.
+Raw telemetry and health status work without calibration. Uncalibrated values
+are never labelled as kPa. Set `PRESSURE_ZERO_RAW`, `PRESSURE_CAL_RAW` and
+`PRESSURE_CAL_KPA` to enable gauge pressure readings. The existing zero value
+1339145 is retained; recheck it if wiring, supply or the sensor changes.
 
-The top row now shows Temperature, Pressure and Last measured pH. The existing
-controller/heater panel follows, then the pH monitoring panel. All existing
-controller, heater, safety, fault injection and temperature history behaviour
-remains unchanged.
+The HX710B sends 24 signed data bits followed by three mode-selection clocks
+(27 total), selecting the differential input at nominal 40 samples/second.
+Telemetry is limited to five updates/second, while bubble detection processes
+every successful conversion. Clock delays beyond the datasheet timing limit
+cause the sample to be discarded and the ADC to be reset. Persistent timing
+warnings require investigation on the Pi; Python/Linux is not a real-time bus
+controller. Missing samples and ADC saturation invalidate detection health.
 
-- Defaults: minimum 4.2, maximum 6.0. Values exactly on either limit are in range.
-- Edit both limits and select **Save pH limits**. Invalid or empty limits are
-  rejected. Saved limits persist in this browser, independently of the controller.
-- The notification and pH value use green (within limits), amber (low) or red
-  (high), with explicit status text. Older readings are grey and labelled.
-- Simulation produces one random measurement every 10 real seconds, unaffected
-  by the accelerated tank simulation. Each six-sample cycle has four in-range
-  readings, one low and one high relative to the default limits. Changing the
-  notification limits does not change simulated measurements.
-- pH history uses individual dots with no joining lines, including in Report
-  and Sensor history. Both dashed lines and dot colours use the currently saved
-  limits, including for earlier measurements. The dedicated chart has a time filter.
-- Measurements are saved in the existing readings CSV. Retained MQTT values
-  are not logged as new measurements and have unknown measurement time.
-- No recent reading (30 seconds), lost broker connection, and waiting for data
-  are shown explicitly. An old reading is never presented as a current reading.
+Bubble detection learns a baseline from 80 samples, rejects brief/noisy drops,
+counts a sustained drop once, then requires sustained recovery before counting
+another. The threshold combines a minimum count drop and an adaptive noise
+estimate. Tune the minimum drop, hold/recovery times and drop direction using
+actual bubble traces. A pressure drop alone cannot identify its physical cause;
+leaks or valve operations may also create events. The count is per hardware
+process session. CSV event history survives restart; the live count does not.
+Rate is the number of unique events observed by that monitor in the last 60
+seconds, not a calibrated gas flow measurement. QoS duplicates are deduplicated
+using the process session and count. Events missed while a monitor is offline
+are not reconstructed.
 
-### Connecting the real pH probe later
+## Temperature and actuator behavior
 
-Set `SIM_PH_ENABLED = False` in `config.py` and restart the simulator before
-using a real pH source. Your hardware adapter should publish only when the
-probe is inserted and a stable valid measurement is taken, for example after
-an operator presses a physical/software measurement button. Probe insertion
-cannot be inferred reliably from its numeric reading alone; hardware-specific
-acquisition and calibration remain in that adapter.
+The existing heating-only hysteresis is retained:
 
-Publish `{"ph": 5.2, "valid": true}` without MQTT retention on
-`biodigester/sensors/ph`. Values outside 0–14, non-finite values and explicit
-`"valid": false` samples are ignored. The simulator includes `"simulated": true`
-so its values are clearly labelled. Times shown are local receipt times on the
-computer running the dashboard; publish real measurements when acquired.
-Do not continuously publish an old sample while the probe is removed.
+- Below 35 C: request `PELTIER_HEAT_POWER` (default +100%).
+- Above 37 C: request zero.
+- Inside the band: retain the previous heating request.
+- Minimum ON/OFF timers apply to ordinary switching; faults force zero immediately.
 
-### Changed files
+The hardware driver supports signed -100 to +100% commands, with both PWM
+outputs off for 50 ms before reversal. Automatic cooling/PID is not implemented.
+Positive means RPWM, negative means LPWM; check which polarity heats the vessel
+before running automatic control. `applied_power` reports the software PWM
+setting, **not measured current or proof of delivered heat**.
 
-`config.py`, `dashboard.py`, `monitoring/monitoring_service.py`,
-`simulation/simulator_service.py`, and this README; added
-`monitoring/ph_monitor.py` and `tests/test_ph_monitoring.py`.
-No additional runtime dependencies are required.
+Heating needs a fresh live temperature and fresh live actuator report. Missing,
+stale or implausible temperatures inhibit heating, as do missing actuator
+feedback, output mismatch, high temperature and thermal response faults.
+The provisional process limits are 40 C high and 42 C high-high. Response and
+frozen-sensor observation windows are 600 seconds, replacing the former
+12-second demo settings; validate these for the actual vessel and Peltier.
+
+High-high temperature, unexpected output and power mismatch send `TRIP`, which
+latches both PWM outputs off. A controller command timeout (10 seconds) or MQTT
+disconnect also disables and latches the output. Saved MQTT power/reset commands
+are ignored. After the cause is removed, use the dashboard's acknowledgement
+button. The controller checks that temperature is trustworthy and inhibiting
+faults have cleared before requesting RESET. Reset itself leaves output at zero
+until a new power command arrives. A normal controller stop sends zero power.
+
+The Pi latch is **software protection**, not an independent hardware cut-out.
+It cannot disconnect a failed power transistor or keep controlling after the
+Pi loses power. Real independent protection requires separate hardware capable
+of removing the Peltier supply. The documented limits are provisional, not
+certified operating limits.
+
+## MQTT contracts
+
+All application payloads are JSON objects. Commands/events are non-retained;
+state and diagnostics are retained but presented as saved/stale until live
+updates arrive. Retained temperature/output reports cannot authorize heating.
+
+| Topic (`biodigester/` prefix) | Payload example |
+|---|---|
+| `sensors/temperature` | `{"temperature":36.52}` |
+| `sensors/pressure` | `{"pressure":2.31}` |
+| `sensors/pressure/status` | `{"online":true,"ready":true,"mode":"both","calibrated":true,"error":null}` |
+| `diagnostics/pressure/raw` | `{"raw":1500000}` |
+| `diagnostics/pressure/drop` | `{"drop":15000}` |
+| `diagnostics/pressure/threshold` | `{"threshold":10000}` |
+| `sensors/bubble` | `{"bubble":true,"count":52,"session":"unique-process-id","ready":true}` |
+| `events/bubble` | `{"event":"bubble","count":52,"session":"unique-process-id","drop":15000,"threshold":10000}` |
+| `peltier/cmd` | `{"power":100}` |
+| `peltier/state` | `{"online":true,"requested_power":100,"applied_power":100,"direction":"POSITIVE","safety_latched":false,"watchdog_timed_out":false,"last_error":null}` |
+| `peltier/safety` | `{"action":"TRIP"}` or `{"action":"RESET"}` |
+| `control/thresholds` | `{"low":35,"high":37}` |
+| `control/status` | Controller mode, temperature, thresholds and fault list |
+| `faults/ack` | `{"code":"ALL"}` |
+| `sensors/ph` | `{"ph":5.2}` (monitoring only) |
+
+The old `heater/*`, `temperature`, `digester/*` and `peltier/power` interfaces
+are no longer consumed. Remove old retained actuator commands from your broker
+before upgrading. All hardware and controller processes must use the same
+version of the repository and central config.
+
+## Monitoring and tests
+
+The dashboard shows continuous sensor history, Peltier state, pressure hardware
+health, bubble count/rate, fault events and intermittent pH samples. The OLED
+shows temperature, pressure, bubble count/rate, actuator output and controller
+status. Stale/unknown OLED readings are shown as `--` rather than live values.
+Sensor, fault and bubble events are saved separately under `data/`.
+pH limits are notification-only and saved in the browser; they never command
+the Peltier. Invalid pH readings are rejected and simulated samples labelled.
+
+```bash
+python -m pip install -r requirements-test.txt
+python -m pytest -q
+```
+
+The suite covers pure control rules, monitoring, calibration on either slope,
+bubble noise/hold/recovery behavior, mode selection, GPIO pin assignments,
+signed ADC conversion, bridge reversal, watchdog/latch/reset, temperature sysfs,
+OLED rendering and live MQTT safety behavior. MQTT integration creates a private
+broker on an ephemeral localhost port; it never uses the production broker.
+Optional OLED constructor tests need `requirements-pi.txt`; GPIO/SPI are mocked.
+Physical wiring, ADC clock timing under Pi load and actual heating polarity must
+still be verified on the installed hardware.
+
+`control_logic.py` and `fault_handling.py` are legacy pure teaching modules;
+`controller.py` uses `controller_system/` for the live controller.

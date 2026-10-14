@@ -41,3 +41,5 @@ Useful terms:
 - retained: a saved broker message; readings are displayed but not logged again
 - snapshot: a copy of the latest shared data for the dashboard to read
 - monotonic time: an elapsed-time clock used for freshness checks
+
+See ../README.md and ../HARDWARE.md for the current signed Peltier MQTT contracts, pressure/bubble modes, and wiring.

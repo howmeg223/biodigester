@@ -174,7 +174,10 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
              style={"display": "flex", "justifyContent": "center", "flexWrap": "wrap", "marginBottom": "16px"}),
 
     html.Div(style={"background": "#f3f5f4", "padding": "16px", "borderRadius": "10px"}, children=[
-        html.H3("Controller and heater"),
+        html.H3("Pressure and gas bubbles"),
+        html.Div(id="pressure-status"),
+        html.Div(id="bubble-status"),
+        html.H3("Controller and Peltier"),
         html.Div(id="controller-status", role="status"),
         html.Div(style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "marginTop": "12px"}, children=[
             html.Label("Lower temperature (°C)", htmlFor="range-low"),
@@ -226,7 +229,7 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
             html.Button("Temperature sensor freezes", id={"type": "fault", "key": "temp_sensor_frozen"}, n_clicks=0),
             html.Button("Sensor out of range", id={"type": "fault", "key": "temp_sensor_out_of_range"}, n_clicks=0),
             html.Button("Heater reports ON but produces no heat", id={"type": "fault", "key": "heater_no_heat"}, n_clicks=0),
-            html.Button("Heater relay stuck ON", id={"type": "fault", "key": "heater_stuck_on"}, n_clicks=0),
+            html.Button("Peltier output stuck ON", id={"type": "fault", "key": "heater_stuck_on"}, n_clicks=0),
             html.Button("Clear injected fault", id={"type": "fault", "key": "none"}, n_clicks=0),
         ]),
         html.Div(id="fault-result", role="status"),
@@ -276,7 +279,7 @@ def refresh_cards(_):
                 qualifier += "; no recent reading"
             stamps.append(f"{source} · {qualifier}")
             continue
-        stale = time.monotonic() - received > config.TEMP_STALE_AFTER_S
+        stale = time.monotonic() - received > (config.PRESSURE_STALE_AFTER_S if key == "pressure" else config.TEMP_STALE_AFTER_S)
         if retained:
             stamps.append("saved value; waiting for live data")
         elif stale or not connected:
@@ -326,15 +329,15 @@ def refresh_controller(_):
     children = [html.Strong(f"{mode}: "), html.Span(status.get("reason", ""))]
     if "low" in status and "high" in status:
         children.append(html.Div(f"Control band: {status['low']:g} to {status['high']:g} °C"))
-    heater_entry = messages.get(config.TOPIC_HEATER_STATE)
+    heater_entry = messages.get(config.TOPIC_PELTIER_STATE)
     if heater_entry:
         heater, received, retained = heater_entry
         stale = retained or not connected or time.monotonic() - received > config.TEMP_STALE_AFTER_S
         qualifier = " (saved/stale)" if stale else ""
-        cutout = "TRIPPED" if heater.get("safety_cutout") else "ready"
+        cutout = "LATCHED" if heater.get("safety_latched") else "ready"
         children.append(html.Div(
-            f"Normal heater relay: {heater.get('relay_state', '?')}; "
-            f"independent safety cut-out: {cutout}{qualifier}"))
+            f"Peltier output: {heater.get('applied_power', '?')}%; "
+            f"software safety latch: {cutout}{qualifier}"))
     if status.get("note"):
         children.append(html.Div(status["note"]))
 
@@ -428,6 +431,18 @@ def refresh_ph(_, limits, range_name):
                 color = "#666"
     return html.Strong(message, style={"color": color}), figure, {
         "fontSize": "28px", "margin": "4px 0", "color": color}
+
+
+@app.callback(Output("pressure-status", "children"), Output("bubble-status", "children"),
+              Input("tick", "n_intervals"))
+def refresh_bubbles(_):
+    pressure = monitor.pressure_summary()
+    bubble = monitor.bubble_summary()
+    last = bubble["last_bubble"].strftime("%H:%M:%S") if bubble["last_bubble"] else "none observed"
+    state = ("ACTIVE" if bubble["active"] else "idle") if bubble["live"] else "waiting/stale"
+    return pressure["description"], (
+        f"Bubbles: {state}; count this hardware session: {bubble['count']}; "
+        f"observed last 60 s: {bubble['rate']}/min; last observed: {last}")
 
 
 def main():

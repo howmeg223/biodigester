@@ -1,5 +1,5 @@
 The simulation folder provides a demonstration digester,
-sensors and heater so the project can run without real hardware.
+sensors and Peltier so the project can run without real hardware.
 
 simulator_service:
 - configures MQTT subscriptions for heater, safety and test-fault commands
@@ -20,7 +20,7 @@ devices:
 - SimulatedTemperatureSensor adds noise to the model's true temperature
 - can stop temperature readings, freeze them or send an implausible reading
 - SimulatedPressureSensor produces example pressure readings
-- SimulatedHeater models the normal relay and an independent safety cut-out
+- SimulatedHeater models the normal relay and an software safety latch
 - can mimic an ON relay that produces no heat or a relay stuck ON
 - trips the safety cut-out if controller commands stop arriving
 
@@ -44,4 +44,6 @@ Useful terms:
 - relay: the normal ON/OFF switch for the heater
 - simulation speed: simulated seconds per real second (60 by default)
 
-Pressure is displayed only. pH is reserved in config.py but is not simulated yet.
+Pressure is monitored only. Intermittent simulated pH samples are published every PH_SAMPLE_PERIOD_S real seconds.
+
+See ../README.md and ../HARDWARE.md for the current signed Peltier MQTT contracts, pressure/bubble modes, and wiring.

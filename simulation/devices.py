@@ -3,6 +3,7 @@ import random
 import time
 
 import config
+from mqtt_common import read_power
 
 
 class SimulatedTemperatureSensor:
@@ -52,23 +53,30 @@ class SimulatedHeater:
         self.rated_power_w = rated_power_w
         self.clock = clock
         self.relay_on = False
+        self.requested_power = 0.0
+        self.power = 0.0
         self.safety_cutout = False
         self.no_heat_failure = False
         self.stuck_on_failure = False
         self.last_command_time = None
 
-    def command(self, on):
+    def command(self, power):
         self.last_command_time = self.clock()
-        if self.stuck_on_failure:
-            self.relay_on = True
+        self.requested_power = read_power({"power": power})
+        if self.safety_cutout:
+            self.power = 0.0
         else:
-            self.relay_on = bool(on)
+            self.power = 100.0 if self.stuck_on_failure else self.requested_power
+        self.relay_on = abs(self.power) >= config.PELTIER_DEADBAND_PERCENT
 
     def trip_safety(self):
         self.safety_cutout = True
 
     def reset_safety(self):
         self.safety_cutout = False
+        self.power = 0.0
+        self.relay_on = False
+        self.last_command_time = None
 
     def set_no_heat_failure(self, enabled):
         self.no_heat_failure = bool(enabled)
@@ -82,7 +90,7 @@ class SimulatedHeater:
         """Trip the cut-out if commands stop; return True only for a new trip."""
         if self.last_command_time is None:
             return False
-        if self.clock() - self.last_command_time > config.HEATER_COMMAND_TIMEOUT_S:
+        if config.PELTIER_COMMAND_TIMEOUT_S is not None and self.clock() - self.last_command_time > config.PELTIER_COMMAND_TIMEOUT_S:
             if not self.safety_cutout:
                 self.trip_safety()
                 return True
@@ -93,11 +101,12 @@ class SimulatedHeater:
         """Actual heating power; the relay can be ON even when no heat is delivered."""
         if self.safety_cutout or not self.relay_on or self.no_heat_failure:
             return 0.0
-        return self.rated_power_w
+        return self.rated_power_w * self.power / 100.0
 
     def state_payload(self):
-        return {
-            "relay_state": "ON" if self.relay_on else "OFF",
-            "safety_cutout": self.safety_cutout,
-            "effective_power": "ON" if self.delivered_power_w > 0 else "OFF",
-        }
+        applied = 0.0 if self.safety_cutout else self.power
+        return {"online": True, "requested_power": self.requested_power,
+                "applied_power": applied,
+                "direction": "POSITIVE" if applied > 0 else "NEGATIVE" if applied < 0 else "OFF",
+                "safety_latched": self.safety_cutout, "watchdog_timed_out": False,
+                "last_error": None}

@@ -20,6 +20,8 @@ def make_client(client_id):
         ) from exc
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     client.reconnect_delay_set(min_delay=1, max_delay=5)
+    if config.MQTT_USERNAME is not None:
+        client.username_pw_set(config.MQTT_USERNAME, config.MQTT_PASSWORD)
     return client
 
 
@@ -49,7 +51,7 @@ def send(client, topic, payload, retain=False):
     keep the latest message for clients that subscribe later.
     """
     if client.is_connected():
-        client.publish(topic, json.dumps(payload), qos=1, retain=retain)
+        client.publish(topic, json.dumps(payload, allow_nan=False), qos=1, retain=retain)
 
 
 def read_json(msg):
@@ -61,3 +63,22 @@ def read_json(msg):
     if isinstance(data, dict):
         return data
     return None
+
+
+def read_power(data, key="power"):
+    """Validate the shared signed Peltier MQTT contract."""
+    import math
+    if not isinstance(data, dict) or isinstance(data.get(key), bool):
+        raise ValueError("power must be numeric")
+    try:
+        value = float(data[key])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("power must be numeric") from exc
+    if not math.isfinite(value) or not -100 <= value <= 100:
+        raise ValueError("power must be finite and between -100 and 100")
+    return value
+
+
+def stop_requested(signum, frame):
+    """Let hardware main loops run their finally cleanup on SIGTERM."""
+    raise KeyboardInterrupt

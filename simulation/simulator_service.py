@@ -3,7 +3,7 @@ import threading
 import time
 
 import config
-from mqtt_common import connected_ok, read_json, send
+from mqtt_common import connected_ok, read_json, read_power, send
 from simulation.devices import SimulatedHeater, SimulatedPressureSensor, SimulatedTemperatureSensor
 from simulation.digester_model import DigesterModel, ambient_temperature
 from simulation.fault_injector import FaultInjector
@@ -31,6 +31,8 @@ class SimulatorService:
         self.fault_injector = FaultInjector(
             self.temperature_sensor, self.heater, self._true_temperature)
         self.sim_time_s = 0.0
+        self._next_ph_at = None
+        self._ph_index = 0
         self._configure_mqtt()
 
     def _true_temperature(self):
@@ -43,21 +45,24 @@ class SimulatorService:
 
     def _on_connect(self, client, userdata, flags, reason_code, *extra):
         if connected_ok(reason_code):
-            client.subscribe(config.TOPIC_HEATER_CMD, qos=1)
-            client.subscribe(config.TOPIC_SAFETY_CMD, qos=1)
+            client.subscribe(config.TOPIC_PELTIER_CMD, qos=1)
+            client.subscribe(config.TOPIC_PELTIER_SAFETY_CMD, qos=1)
             client.subscribe(config.TOPIC_SIM_FAULT, qos=1)
             print("[simulator] Connected. Simulated devices are publishing.")
 
     def _on_message(self, client, userdata, msg):
+        if getattr(msg, "retain", False):
+            return
         data = read_json(msg)
         if not isinstance(data, dict):
             return
         with self.lock:
-            if msg.topic == config.TOPIC_HEATER_CMD:
-                action = data.get("action")
-                if action in ("ON", "OFF"):
-                    self.heater.command(action == "ON")
-            elif msg.topic == config.TOPIC_SAFETY_CMD:
+            if msg.topic == config.TOPIC_PELTIER_CMD:
+                try:
+                    self.heater.command(read_power(data))
+                except ValueError:
+                    return
+            elif msg.topic == config.TOPIC_PELTIER_SAFETY_CMD:
                 action = data.get("action")
                 if action == "TRIP":
                     self.heater.trip_safety()
@@ -89,13 +94,24 @@ class SimulatorService:
                      {"temperature": round(temperature, 2)})
             pressure = self.pressure_sensor.read()
             send(self.client, config.TOPIC_PRESSURE, {"pressure": round(pressure, 3)})
-            send(self.client, config.TOPIC_HEATER_STATE, self.heater.state_payload(), retain=True)
+            send(self.client, config.TOPIC_PRESSURE_STATUS, {"online": True, "ready": True,
+                 "mode": "pressure", "calibrated": True, "simulated": True}, retain=True)
+            send(self.client, config.TOPIC_PELTIER_STATE, self.heater.state_payload(), retain=True)
             send(self.client, config.TOPIC_SIM_STATE, {
                 "fault": self.fault_injector.active_fault,
                 "ambient": round(ambient, 1),
                 "speed": self.speed,
                 "true_temperature": round(self.model.temp_c, 2),
             }, retain=True)
+
+    def publish_ph_if_due(self, now):
+        if not config.SIM_PH_ENABLED or (self._next_ph_at is not None and now < self._next_ph_at):
+            return
+        values = (5.0, 5.2, 5.4, 5.6, 3.9, 6.4)
+        value = values[self._ph_index % len(values)]
+        self._ph_index += 1
+        self._next_ph_at = now + config.PH_SAMPLE_PERIOD_S
+        send(self.client, config.TOPIC_PH, {"ph": value, "simulated": True})
 
     def run(self):
         """Update physics frequently and publish readings at the sensor interval."""
@@ -106,6 +122,7 @@ class SimulatorService:
             while True:
                 time.sleep(self.TICK_S)
                 now = time.monotonic()
+                self.publish_ph_if_due(now)
                 elapsed = now - last_tick
                 last_tick = now
                 if self.heater.watchdog():
