@@ -30,6 +30,7 @@ class TemperatureSensorMonitor:
         self.value = None
         self.received_at = None
         self.samples = deque()
+        self._heating_since = None
 
     def add_reading(self, value, received_at):
         """Save the latest value and keep valid numeric samples for frozen checks."""
@@ -40,7 +41,7 @@ class TemperatureSensorMonitor:
             self._trim(received_at)
 
     def evaluate(self, now, heating_expected=False):
-        """Return a usable temperature only when every sensor check passes."""
+        """Return a usable fresh, plausible temperature; flatness is diagnostic only."""
         self._trim(now)
         no_data = self.received_at is None or self.value is None
         age = None
@@ -51,18 +52,24 @@ class TemperatureSensorMonitor:
         if not no_data and not stale:
             try:
                 value = float(self.value)
-                out_of_range = (not math.isfinite(value) or value < self.plausible_min_c
+                out_of_range = (isinstance(self.value, bool) or not math.isfinite(value) or value < self.plausible_min_c
                                 or value > self.plausible_max_c)
             except (TypeError, ValueError, OverflowError):
                 out_of_range = True
 
+        if not heating_expected or no_data or stale or out_of_range:
+            self._heating_since = None
+        elif self._heating_since is None:
+            self._heating_since = now
+
         stuck = False
-        if heating_expected and not no_data and not stale and not out_of_range and len(self.samples) >= 2:
-            duration = self.samples[-1][0] - self.samples[0][0]
-            # A nearly unchanged reading is suspicious only while heat is expected.
-            values = [temperature for timestamp, temperature in self.samples]
-            if duration >= self.stuck_window_s and max(values) - min(values) <= self.stuck_max_span_c:
-                stuck = True
+        if self._heating_since is not None:
+            samples = [(stamp, value) for stamp, value in self.samples if stamp >= self._heating_since]
+            if len(samples) >= 2:
+                duration = samples[-1][0] - samples[0][0]
+                values = [value for _, value in samples]
+                if duration >= self.stuck_window_s and max(values) - min(values) <= self.stuck_max_span_c:
+                    stuck = True
 
         conditions = {
             "TEMP_SENSOR_NO_DATA": no_data,
@@ -70,7 +77,9 @@ class TemperatureSensorMonitor:
             "TEMP_SENSOR_OUT_OF_RANGE": out_of_range,
             "TEMP_SENSOR_STUCK": stuck,
         }
-        trustworthy = not any(conditions.values())
+        # Repeated fresh values may be real thermal inertia or quantisation.
+        # Flatness cannot establish sensor failure, so it does not reject them.
+        trustworthy = not (no_data or stale or out_of_range)
         value = None
         if trustworthy:
             value = float(self.value)

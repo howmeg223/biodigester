@@ -1,4 +1,4 @@
-"""Actuator diagnostics based on relay feedback and physical thermal response."""
+"""Actuator feedback faults and non-blocking thermal response diagnostics."""
 import config
 
 
@@ -54,6 +54,11 @@ class HeaterMonitor:
             elif now - self._heat_started >= config.PELTIER_RESPONSE_WINDOW_S:
                 rise = temperature_c - self._heat_baseline
                 thermal_failure = rise < config.PELTIER_MIN_RISE_C
+                if not thermal_failure:
+                    # Start a new observation window after a successful rise.
+                    # A delayed rise clears the warning without acknowledgement.
+                    self._heat_started = now
+                    self._heat_baseline = temperature_c
         else:
             self._heat_started = None
             self._heat_baseline = None

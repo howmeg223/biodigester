@@ -38,10 +38,9 @@ FAULT_DEFINITIONS = {
         inhibit_heating=True,
     ),
     "TEMP_SENSOR_STUCK": FaultDefinition(
-        "TEMP_SENSOR_STUCK", FaultCategory.SENSOR, Severity.CRITICAL,
-        "The temperature sensor appears frozen while heating is expected to change the process.",
-        "Heating is disabled until the sensor produces trustworthy changing readings.",
-        inhibit_heating=True,
+        "TEMP_SENSOR_STUCK", FaultCategory.SENSOR, Severity.WARNING,
+        "Fresh temperature readings have remained nearly constant during the heating observation window.",
+        "Heating continues. Check thermal lag, probe position and sensor operation; flat readings alone do not prove sensor failure.",
     ),
     "LOW_TEMPERATURE": FaultDefinition(
         "LOW_TEMPERATURE", FaultCategory.PROCESS, Severity.WARNING,
@@ -73,10 +72,9 @@ FAULT_DEFINITIONS = {
         inhibit_heating=True, trip_safety=True, latching=True,
     ),
     "HEATER_NO_THERMAL_RESPONSE": FaultDefinition(
-        "HEATER_NO_THERMAL_RESPONSE", FaultCategory.ACTUATOR, Severity.ERROR,
-        "The heater reports ON but the expected temperature rise was not observed.",
-        "Stop the heating attempt and require acknowledgement after the heater is checked.",
-        inhibit_heating=True, latching=True,
+        "HEATER_NO_THERMAL_RESPONSE", FaultCategory.ACTUATOR, Severity.WARNING,
+        "Reported heating has not produced the configured temperature rise within the observation window.",
+        "Heating continues. Check warm-up time, thermal contact, heat losses and Peltier polarity; tune the diagnostic window to the vessel.",
     ),
     "SAFETY_CUTOUT_TRIPPED": FaultDefinition(
         "SAFETY_CUTOUT_TRIPPED", FaultCategory.SYSTEM, Severity.ERROR,
