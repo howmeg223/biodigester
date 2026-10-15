@@ -3,7 +3,7 @@ import random
 import time
 
 import config
-from mqtt_common import read_power
+from mqtt_common import read_power, limit_peltier_power, peltier_power_limit, POWER_CONTROL_VERSION
 
 
 class SimulatedTemperatureSensor:
@@ -66,7 +66,7 @@ class SimulatedHeater:
         if self.safety_cutout:
             self.power = 0.0
         else:
-            self.power = 100.0 if self.stuck_on_failure else self.requested_power
+            self.power = 100.0 if self.stuck_on_failure else limit_peltier_power(self.requested_power)
         self.relay_on = abs(self.power) >= config.PELTIER_DEADBAND_PERCENT
 
     def trip_safety(self):
@@ -106,7 +106,8 @@ class SimulatedHeater:
     def state_payload(self):
         applied = 0.0 if self.safety_cutout else self.power
         return {"online": True, "requested_power": self.requested_power,
-                "applied_power": applied,
+                "applied_power": applied, "simulated": True,
+                "driver_version": POWER_CONTROL_VERSION, "max_power": peltier_power_limit(),
                 "direction": "POSITIVE" if applied > 0 else "NEGATIVE" if applied < 0 else "OFF",
                 "safety_latched": self.safety_cutout, "watchdog_timed_out": False,
                 "last_error": None}

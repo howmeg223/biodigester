@@ -96,6 +96,15 @@ Positive commands drive RPWM; negative commands drive LPWM. The controller
 currently requests only positive heating or zero. Verify at low power with
 `controller.py` stopped that positive power heats the intended face; if it cools,
 swap the Peltier power leads after powering down. Software cannot infer orientation.
+
+`PELTIER_MAX_POWER = 30.0` is the single setting for automatic heating duty
+and the PWM cap in both directions, including manual
+MQTT commands: +100 applies +30%, -100 applies -30%, and -20 applies -20%.
+Older configuration files without this setting default to 30%. The old
+`PELTIER_HEAT_POWER` setting is no longer used.
+The controller compares feedback with the capped command. Restart both the
+controller and Peltier services after changing these settings.
+These percentages are PWM duty cycles, not measured electrical or thermal power.
 Do not leave the bridge/Peltier unattended during that test.
 
 The software latch turns both PWM outputs off, but cannot isolate a failed
@@ -124,10 +133,11 @@ OLED reset. SPI0 clock/MOSI/CE0 do not overlap with the temperature, pressure or
 H-bridge assignments.
 
 Enable SPI in `raspi-config`, reboot, and verify `/dev/spidev0.0` exists.
-Install `requirements-pi.txt`, then run `python -m pi.oled`.
+Install `requirements.txt`, then run `python -m pi.oled`.
 The SPI driver uses an `lgpio` adapter for DC/reset so it does not depend on the
 old `RPi.GPIO` backend on a Pi 5. Hardware SPI carries display data.
-Set `OLED_ROTATE = 2` if the display is upside down.
+`OLED_ROTATE = 2` flips the display 180 degrees and is now the default.
+Use `OLED_ROTATE = 0` for the original orientation.
 
 If your particular board has already been converted to I2C, set
 `OLED_INTERFACE = "i2c"`, wire SDA to BCM2 (physical 3), SCL to BCM3 (physical 5),

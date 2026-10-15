@@ -79,8 +79,11 @@ def read_power(data, key="power"):
     return value
 
 
-def limit_peltier_power(power):
-    """Cap signed PWM duty; older Pi configurations default to a 30% cap."""
+POWER_CONTROL_VERSION = "pwm-cap-v2"
+
+
+def peltier_power_limit():
+    """Read and validate the maximum PWM duty in the active config module."""
     import math
     limit = getattr(config, "PELTIER_MAX_POWER", 30.0)
     if isinstance(limit, bool):
@@ -88,8 +91,20 @@ def limit_peltier_power(power):
     limit = float(limit)
     if not math.isfinite(limit) or not 0 <= limit <= 100:
         raise ValueError("PELTIER_MAX_POWER must be finite and between 0 and 100")
+    return limit
+
+
+def limit_peltier_power(power):
+    """Cap signed duty and apply the same deadband in all processes."""
+    limit = peltier_power_limit()
     power = read_power({"power": power})
-    return max(-limit, min(limit, power))
+    power = max(-limit, min(limit, power))
+    return 0.0 if abs(power) < config.PELTIER_DEADBAND_PERCENT else power
+
+
+def peltier_heating_power():
+    """Automatic heating uses the single maximum-power setting directly."""
+    return limit_peltier_power(peltier_power_limit())
 
 
 def stop_requested(signum, frame):

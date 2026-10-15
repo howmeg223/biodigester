@@ -13,10 +13,10 @@ GPIO4. If your working probe uses a different overlay pin, keep that overlay;
 `temp.py` reads Linux sysfs and does not change the 1-Wire pin itself.
 
 ```bash
-sudo apt install mosquitto mosquitto-clients python3-venv python3-dev build-essential swig
+sudo apt install mosquitto mosquitto-clients python3-venv python3-dev build-essential swig liblgpio-dev
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-pi.txt
+python -m pip install -r requirements.txt
 ```
 
 Your user needs access to `/dev/gpiochip0` and `/dev/spidev0.0` (normally the
@@ -73,16 +73,18 @@ Run **one** pressure process at a time.
 Pressure is monitoring-only; there is no configured pressure trip limit.
 Raw telemetry and health status work without calibration. Uncalibrated values
 are never labelled as kPa. Set `PRESSURE_ZERO_RAW`, `PRESSURE_CAL_RAW` and
-`PRESSURE_CAL_KPA` to enable gauge pressure readings. The existing zero value
-1339145 is retained; recheck it if wiring, supply or the sensor changes.
+`PRESSURE_CAL_KPA` to enable gauge pressure readings. The current calibration
+is retained; recheck it if wiring, supply or the sensor changes.
 
 The HX710B sends 24 signed data bits followed by three mode-selection clocks
 (27 total), selecting the differential input at nominal 40 samples/second.
 Telemetry is limited to five updates/second, while bubble detection processes
-every successful conversion. Clock delays beyond the datasheet timing limit
-cause the sample to be discarded and the ADC to be reset. Persistent timing
-warnings require investigation on the Pi; Python/Linux is not a real-time bus
-controller. Missing samples and ADC saturation invalidate detection health.
+every successful conversion. SCK is lowered immediately after being raised,
+and the data bit is read while SCK is low. There are no sleeps while SCK is high.
+Python call-duration measurements are not used to reset the ADC: they cannot
+measure the actual electrical pulse width. Python/Linux is not a real-time bus
+controller; physical timing still needs validation under Pi load. Missing
+samples and ADC saturation invalidate detection health.
 
 Bubble detection learns a baseline from 80 samples, rejects brief/noisy drops,
 counts a sustained drop once, then requires sustained recovery before counting
@@ -100,23 +102,34 @@ are not reconstructed.
 
 The existing heating-only hysteresis is retained:
 
-- Below 35 C: request `PELTIER_HEAT_POWER` (default +100%).
+- Below 35 C: request `PELTIER_MAX_POWER` (default +30%).
 - Above 37 C: request zero.
 - Inside the band: retain the previous heating request.
 - Minimum ON/OFF timers apply to ordinary switching; faults force zero immediately.
 
-The hardware driver supports signed -100 to +100% commands, with both PWM
-outputs off for 50 ms before reversal. Automatic cooling/PID is not implemented.
+`PELTIER_MAX_POWER` in `config.py` is the single power setting. It sets automatic
+heating duty and caps manual heating/cooling duty in both directions. For example,
+30 means +30% while heating, -30% for a full manual cooling request, and zero
+when off. The old `PELTIER_HEAT_POWER` setting is no longer used.
+Restart the controller, Peltier and dashboard services after changing config.
+The dashboard shows the driver's reported PWM duty and maximum, and the controller
+publishes the same limited command. Both PWM outputs turn off for 50 ms before
+reversal. Automatic cooling/PID is not implemented.
 Positive means RPWM, negative means LPWM; check which polarity heats the vessel
 before running automatic control. `applied_power` reports the software PWM
 setting, **not measured current or proof of delivered heat**.
 
 Heating needs a fresh live temperature and fresh live actuator report. Missing,
 stale or implausible temperatures inhibit heating, as do missing actuator
-feedback, output mismatch, high temperature and thermal response faults.
+feedback, output mismatch and high temperature. A slow thermal response or
+nearly constant fresh temperature produces a warning, not a shutdown.
 The provisional process limits are 40 C high and 42 C high-high. Response and
-frozen-sensor observation windows are 600 seconds, replacing the former
-12-second demo settings; validate these for the actual vessel and Peltier.
+flat-reading observation windows are 600 seconds, replacing the former
+12-second demo settings. The configured 0.08 C rise is a diagnostic threshold,
+not proof of an actuator or sensor failure. Tune these warnings for the actual
+vessel and Peltier; they never inhibit heating or latch a shutdown. Flatness is
+checked only after a full continuous-heating observation window, excluding
+readings from before heating started.
 
 High-high temperature, unexpected output and power mismatch send `TRIP`, which
 latches both PWM outputs off. A controller command timeout (10 seconds) or MQTT
@@ -254,3 +267,23 @@ settings should be kept when installing an update.
 See [DASHBOARD_UPDATE.md](DASHBOARD_UPDATE.md) for installing the analysis update while preserving Pi configuration and existing data.
 
 See [SERVICES.md](SERVICES.md) to start the hardware, controller and dashboard automatically at boot using systemd.
+
+## Slow-heating diagnostic update
+
+`HEATER_NO_THERMAL_RESPONSE` and `TEMP_SENSOR_STUCK` are warnings only. They
+remain visible and logged, clear automatically when the condition improves,
+and do not disable heating or require acknowledgement. A fresh plausible
+constant measurement is still available for temperature regulation and
+protection against excessive temperature. The flatness timer starts when heating starts; idle
+history does not count against it. Stopping heat or losing valid sensor data
+restarts the observation period.
+
+Actual missing/stale/bad temperature readings, high/high-high temperature,
+missing output feedback, commanded/reported power mismatch, output stuck on,
+software safety latch and actuator watchdog behavior are unchanged. Slow rise
+alone does not prove a hardware failure: vessel mass, thermal contact, losses,
+probe position and sensor resolution affect the observed rise.
+
+Install `thermal-response-fix.zip` over the repository and restart only
+`biodigester@controller.service`. The patch does not replace `config.py`,
+calibration, logging files or the Pi hardware clients.

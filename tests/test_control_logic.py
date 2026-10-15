@@ -47,7 +47,7 @@ def test_simulator_publishes_all_demo_sensors_and_peltier_feedback(monkeypatch):
     assert messages[config.TOPIC_TEMPERATURE] == {"temperature": 28.0}
     assert messages[config.TOPIC_PRESSURE] == {"pressure": 2.0}
     assert messages[config.TOPIC_PH]["simulated"] is True
-    assert messages[config.TOPIC_PELTIER_STATE]["applied_power"] == 100
+    assert messages[config.TOPIC_PELTIER_STATE]["applied_power"] == 30
 
 BAND = Thresholds(low=35.0, high=37.0)
 ON, OFF = True, False

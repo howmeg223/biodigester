@@ -7,6 +7,12 @@ from controller_system.models import FaultCategory, FaultDefinition, FaultState,
 
 
 FAULT_DEFINITIONS = {
+    "PELTIER_POWER_LIMIT_EXCEEDED": FaultDefinition(
+        "PELTIER_POWER_LIMIT_EXCEEDED", FaultCategory.ACTUATOR, Severity.ERROR,
+        "The driver reports PWM duty above the configured maximum.",
+        "Force zero output, trip the software safety latch, and check for an older or conflicting driver.",
+        inhibit_heating=True, trip_safety=True, latching=True,
+    ),
     "PELTIER_POWER_MISMATCH": FaultDefinition(
         "PELTIER_POWER_MISMATCH", FaultCategory.ACTUATOR, Severity.ERROR,
         "Reported Peltier power differs from the requested magnitude or direction.",

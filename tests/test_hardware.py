@@ -47,7 +47,7 @@ def test_bridge_preserves_pins_and_breaks_before_reversing(peltier, monkeypatch)
     hw.set_power(-40)
     calls = [c.args for c in gpio.tx_pwm.call_args_list]
     assert calls[:2] == [(7, 18, 1000, 0), (7, 19, 1000, 0)]
-    assert calls[-1] == (7, 19, 1000, 40)
+    assert calls[-1] == (7, 19, 1000, 30)
     assert delays == [config.PELTIER_DIRECTION_CHANGE_DELAY_S]
     hw.set_power(0)
     assert hw.applied_power == 0
@@ -63,12 +63,51 @@ def test_invalid_power_never_drives_output(peltier, value):
     assert hw.last_command_time is None
 
 
+@pytest.mark.parametrize('requested,applied', [(100, 30), (-100, -30), (20, 20), (-20, -20), (0, 0)])
+def test_manual_commands_obey_both_direction_limits(peltier, requested, applied):
+    hw, gpio = peltier
+    hw._on_message(hw.client, None, message(config.TOPIC_PELTIER_CMD, {'power': requested}))
+    assert hw.requested_power == requested
+    assert hw.applied_power == applied
+    assert all(call.args[3] <= 30 for call in gpio.tx_pwm.call_args_list)
+
+
+def test_configurable_limit_and_old_config_fallback(peltier, monkeypatch):
+    hw, _ = peltier
+    monkeypatch.setattr(config, 'PELTIER_MAX_POWER', 15)
+    hw.set_power(-100)
+    assert hw.applied_power == -15
+    monkeypatch.delattr(config, 'PELTIER_MAX_POWER')
+    hw.set_power(100)
+    assert hw.applied_power == 30
+
+
+@pytest.mark.parametrize('limit', [True, -1, 101, float('nan'), float('inf'), 'bad'])
+def test_invalid_limit_rejected_before_pwm_change(peltier, monkeypatch, limit):
+    hw, _ = peltier
+    hw.set_power(20)
+    monkeypatch.setattr(config, 'PELTIER_MAX_POWER', limit)
+    # Invalid configuration is rejected before changing PWM.
+    with pytest.raises((ValueError, TypeError)):
+        hw.set_power(100)
+
+
+def test_runtime_limit_error_turns_previous_output_off(peltier, monkeypatch):
+    hw, _ = peltier
+    hw.set_power(20)
+    monkeypatch.setattr(config, 'PELTIER_MAX_POWER', 'bad')
+    # State telemetry itself validates the config, so mock publication here.
+    monkeypatch.setattr(hw, 'publish_state', lambda: None)
+    hw._on_message(hw.client, None, message(config.TOPIC_PELTIER_CMD, {'power': 100}))
+    assert hw.applied_power == 0 and hw.safety_latched
+
+
 def test_saved_commands_trip_reset_and_watchdog(peltier):
     hw, _ = peltier
     hw._on_message(hw.client, None, message(config.TOPIC_PELTIER_CMD, {'power': 100}, True))
     assert hw.applied_power == 0
     hw._on_message(hw.client, None, message(config.TOPIC_PELTIER_CMD, {'power': 100}))
-    assert hw.applied_power == 100
+    assert hw.applied_power == 30
     hw.clock = lambda: 11
     assert hw.watchdog_step() and hw.safety_latched and hw.applied_power == 0
     hw._on_message(hw.client, None, message(config.TOPIC_PELTIER_CMD, {'power': 100}))
@@ -93,7 +132,6 @@ def test_failed_bridge_start_closes_gpio(peltier, monkeypatch):
 
 def test_pressure_read_signed_bits_and_27_pulses(client, monkeypatch):
     hw = PressureHardwareClient()
-    monkeypatch.setattr("pi.pressure.time.perf_counter_ns", lambda: 0)
     gpio = Mock()
     gpio.gpiochip_open.return_value = 5
     monkeypatch.setattr(hw, '_lgpio', lambda: gpio)
@@ -247,17 +285,33 @@ def test_oled_actual_sh1106_driver_uses_nonconflicting_spi_pins(monkeypatch):
     assert gpio.gpiochip_close.call_args.args == (4,)
 
 
-def test_pressure_long_clock_pulse_resets_and_rejects_sample(client, monkeypatch):
+def test_pressure_clock_does_not_reset_based_on_python_call_latency(client, monkeypatch):
     hw = PressureHardwareClient()
     hw.gpio = 1
     gpio = Mock()
-    monkeypatch.setattr(hw, '_lgpio', lambda:gpio)
-    ticks = iter([0, 60001])
-    monkeypatch.setattr('pi.pressure.time.perf_counter_ns', lambda:next(ticks))
-    monkeypatch.setattr('pi.pressure.time.sleep', lambda _:None)
-    with pytest.raises(OSError, match='discarded'):
+    gpio.gpio_read.return_value = 1
+    monkeypatch.setattr(hw, '_lgpio', lambda: gpio)
+    # Slow Python clock/call measurements must not trigger invented ADC faults.
+    timer = Mock(side_effect=AssertionError("Do not infer pulse width from Python timing"))
+    sleeper = Mock(side_effect=AssertionError("Do not sleep during a clock pulse"))
+    monkeypatch.setattr('pi.pressure.time.perf_counter_ns', timer)
+    monkeypatch.setattr('pi.pressure.time.sleep', sleeper)
+    assert hw._pulse(read_bit=True) == 1
+    assert [c.args[-1] for c in gpio.gpio_write.call_args_list] == [1, 0]
+    gpio.gpio_read.assert_called_once_with(1, config.PRESSURE_OUT_PIN)
+    timer.assert_not_called()
+    sleeper.assert_not_called()
+
+
+def test_pressure_clock_is_lowered_if_high_write_raises(client, monkeypatch):
+    hw = PressureHardwareClient()
+    hw.gpio = 1
+    gpio = Mock()
+    gpio.gpio_write.side_effect = [OSError("write failed"), None]
+    monkeypatch.setattr(hw, '_lgpio', lambda: gpio)
+    with pytest.raises(OSError, match="write failed"):
         hw._pulse(read_bit=True)
-    assert [c.args[-1] for c in gpio.gpio_write.call_args_list] == [1,0,1,0]
+    assert [c.args[-1] for c in gpio.gpio_write.call_args_list] == [1, 0]
     gpio.gpio_read.assert_not_called()
 
 

@@ -80,6 +80,8 @@ PELTIER_GPIO_CHIP = 0
 PELTIER_RPWM_PIN = 18
 PELTIER_LPWM_PIN = 19
 PELTIER_PWM_FREQUENCY_HZ = 1000
+# Single power setting: automatic heating duty and maximum duty in either direction.
+PELTIER_MAX_POWER = 30.0
 PELTIER_DIRECTION_CHANGE_DELAY_S = 0.050
 PELTIER_COMMAND_TIMEOUT_S = 10.0
 PELTIER_DEADBAND_PERCENT = 1.0
@@ -97,10 +99,6 @@ STRATEGY = "hysteresis"
 CONTROL_PERIOD_S = 1.0
 MIN_ON_S = 5.0
 MIN_OFF_S = 5.0
-
-PELTIER_HEAT_POWER = 5.0
-PELTIER_IDLE_POWER = 0.0
-
 
 # ---------------------------------------------------------- Sensor diagnostics
 TEMP_STALE_AFTER_S = 10.0
@@ -195,8 +193,13 @@ OLED_RESET_PIN = 27
 OLED_GPIO_CHIP = 0
 OLED_I2C_PORT = 1
 OLED_I2C_ADDRESS = 0x3C
-OLED_ROTATE = 0  # 0, 1, 2, 3 quarter turns
+OLED_ROTATE = 2  # 180 degrees; 0, 1, 2, 3 quarter turns
 OLED_REFRESH_S = 1.0
 
 # Legacy pure Regulator settings (not used by controller.py).
 ALARM_MARGIN_C = 2.0
+
+# File-based analysis and manual sampling.
+SAMPLING_SETTLE_S = 60
+REPORT_MAX_BINS = 20000
+TOPIC_BUBBLE_RESET = f"{ROOT}/sensors/bubble/reset"

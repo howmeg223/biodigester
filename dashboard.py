@@ -512,7 +512,9 @@ def refresh_controller(_):
         qualifier = " (saved/stale)" if stale else ""
         cutout = "LATCHED" if heater.get("safety_latched") else "ready"
         children.append(html.Div(
-            f"Peltier output: {heater.get('applied_power', '?')}%; "
+            f"Peltier PWM duty: {heater.get('applied_power', '?')}%; "
+            f"limit: {heater.get('max_power', 'unknown (older driver)')}%; "
+            f"source: {'simulator' if heater.get('simulated') else 'hardware driver'}; "
             f"software safety latch: {cutout}{qualifier}"))
     if status.get("note"):
         children.append(html.Div(status["note"]))

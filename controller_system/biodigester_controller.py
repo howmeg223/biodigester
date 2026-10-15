@@ -10,12 +10,13 @@ from controller_system.heater_monitor import HeaterMonitor
 from controller_system.process_monitor import ProcessMonitor
 from controller_system.sensor_monitor import TemperatureSensorMonitor
 from controller_system.temperature_control import TemperatureController
-from mqtt_common import connected_ok, read_json, read_power, send, limit_peltier_power
+from mqtt_common import connected_ok, read_json, read_power, send, peltier_heating_power, peltier_power_limit, POWER_CONTROL_VERSION
 
 
 class BiodigesterController:
     """Connect the monitors, fault manager and heating rule in one control loop."""
     def __init__(self, client, strategy=config.STRATEGY, clock=time.monotonic):
+        peltier_heating_power()  # Validate power configuration before control starts.
         self.client = client
         self.clock = clock
         self.lock = threading.RLock()
@@ -124,6 +125,10 @@ class BiodigesterController:
                               now - self.feedback_received_at <= config.ACTUATOR_FEEDBACK_TIMEOUT_S)
             self.faults.update_condition("PELTIER_FEEDBACK_STALE",
                 not feedback_fresh and now - self.started_at >= config.ACTUATOR_FEEDBACK_TIMEOUT_S, now)
+            # Over-limit feedback is rejected on the first control cycle rather
+            # than waiting for the normal five-second mismatch diagnostic.
+            self.faults.update_condition("PELTIER_POWER_LIMIT_EXCEEDED",
+                feedback_fresh and abs(self.applied_power) > peltier_power_limit() + 0.005001, now)
             # 1. Check the sensor, process and heater. Heater checks use the
             # command from the previous cycle so the hardware has time to respond.
             sensor_health = self.temperature_sensor.evaluate(
@@ -142,7 +147,7 @@ class BiodigesterController:
                 temperature_c=sensor_health.value,
                 temperature_trustworthy=sensor_health.trustworthy,
                 safety_cutout=self.safety_cutout,
-                commanded_power=limit_peltier_power(config.PELTIER_HEAT_POWER) if self.temperature_control.heating else 0.0,
+                commanded_power=peltier_heating_power() if self.temperature_control.heating else 0.0,
                 applied_power=self.applied_power if feedback_fresh else None,
             )
             for code, condition in heater_conditions.items():
@@ -164,10 +169,11 @@ class BiodigesterController:
             decision = self.temperature_control.update(
                 now,
                 sensor_health.value,
-                heating_allowed=feedback_fresh and not self.faults.heating_inhibited(),
+                heating_allowed=(feedback_fresh and not self.faults.heating_inhibited()
+                                 and peltier_heating_power() > 0),
             )
             send(self.client, config.TOPIC_PELTIER_CMD,
-                 {"power": limit_peltier_power(config.PELTIER_HEAT_POWER) if decision.heating else 0.0})
+                 {"power": peltier_heating_power() if decision.heating else 0.0})
 
             # 4. Tell the dashboard about fault changes and the current state.
             events = self.faults.pop_events()
@@ -186,7 +192,9 @@ class BiodigesterController:
             status = {
                 "mode": mode,
                 "heating": decision.heating,
-                "commanded_power": limit_peltier_power(config.PELTIER_HEAT_POWER) if decision.heating else 0.0,
+                "power_control_version": POWER_CONTROL_VERSION,
+                "max_power": peltier_power_limit(),
+                "commanded_power": peltier_heating_power() if decision.heating else 0.0,
                 "reason": decision.reason,
                 "temperature": sensor_health.value,
                 "temperature_age_s": sensor_health.age_s,

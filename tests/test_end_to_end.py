@@ -72,13 +72,17 @@ def system(tmp_path, monkeypatch):
 
 def test_real_mqtt_heating_bad_sensor_safety_ack_and_watchdog(system):
     c,s,m,advance = system
-    advance(lambda: m.controller_status().get('mode')=='HEATING' and s.heater.power==100)
+    advance(lambda: m.controller_status().get('mode')=='HEATING' and s.heater.power==30)
+    assert 'sent to MQTT' in m.log_manual_ph(5.25)
+    advance(lambda:m.latest.get('ph', (None,))[0]==5.25)
+    assert 'manual' in m.log_file.read_text()
     s.fault_injector.apply('temp_sensor_out_of_range')
     advance(lambda: s.heater.power==0 and 'TEMP_SENSOR_OUT_OF_RANGE' in c.faults.active_codes())
     assert not c.temperature_control.heating
+
     s.fault_injector.apply('none')
     c.temperature_control._last_switch = None
-    advance(lambda:s.heater.power==100)
+    advance(lambda:s.heater.power==30)
     s.model.temp_c=43
     advance(lambda:s.heater.safety_cutout and 'HIGH_HIGH_TEMPERATURE' in c.faults.active_codes())
     assert s.heater.delivered_power_w==0
@@ -90,7 +94,7 @@ def test_real_mqtt_heating_bad_sensor_safety_ack_and_watchdog(system):
     advance(lambda:not s.heater.safety_cutout)
     c.temperature_control._last_switch=None
     s.model.temp_c=34
-    advance(lambda:s.heater.power==100)
+    advance(lambda:s.heater.power==30)
     # Emulate command silence with a controlled actuator clock.
     s.heater.clock=lambda:s.heater.last_command_time+config.PELTIER_COMMAND_TIMEOUT_S+1
     assert s.heater.watchdog()
@@ -98,3 +102,69 @@ def test_real_mqtt_heating_bad_sensor_safety_ack_and_watchdog(system):
     s.publish_readings(14)
     advance(lambda:'SAFETY_CUTOUT_TRIPPED' in c.faults.active_codes())
     assert not c.temperature_control.heating
+
+
+def test_real_mqtt_actual_driver_caps_automatic_and_manual_power(system, monkeypatch):
+    """Exercise Pi driver callbacks and PWM arguments, rather than the simulator."""
+    from unittest.mock import Mock
+    from pi.peltier import PeltierHardwareClient
+    from deploy.install_power_update import verify_live
+    from pathlib import Path
+    import json
+
+    c,s,m,_ = system
+    s.client.disconnect()
+    s.client.loop_stop()
+    monkeypatch.setattr(config, 'PELTIER_HEAT_POWER', 100, raising=False)
+    gpio = Mock()
+    gpio.gpiochip_open.return_value = 7
+    driver_client = make_client('test-real-pi-driver')
+    monkeypatch.setattr('pi.peltier.make_client', lambda _: driver_client)
+    monkeypatch.setattr(PeltierHardwareClient, '_lgpio', lambda _: gpio)
+    hw = PeltierHardwareClient()
+    hw.setup_gpio()
+    failures = []
+    def verify():
+        try:
+            verify_live(Path(__file__).resolve().parents[1], timeout=5)
+        except Exception as exc:
+            failures.append(exc)
+    verifier = threading.Thread(target=verify, daemon=True)
+    try:
+        driver_client.connect(config.BROKER_HOST, config.BROKER_PORT)
+        driver_client.loop_start()
+        deadline = time.monotonic()+5
+        while time.monotonic()<deadline:
+            c.client.publish(config.TOPIC_TEMPERATURE, json.dumps({'temperature':34}))
+            c.step()
+            hw.publish_state()
+            if hw.applied_power==30 and m.controller_status().get('commanded_power')==30:
+                break
+            time.sleep(.05)
+        else:
+            pytest.fail(f'Automatic PWM did not reach 30: {hw.state_payload()}')
+        verifier.start()
+        deadline = time.monotonic()+8
+        while verifier.is_alive() and time.monotonic()<deadline:
+            c.client.publish(config.TOPIC_TEMPERATURE, json.dumps({'temperature':34}))
+            c.step()
+            hw.publish_state()
+            time.sleep(.05)
+        verifier.join(1)
+        assert not verifier.is_alive() and not failures, failures
+        assert 'PELTIER_POWER_MISMATCH' not in c.faults.active_codes()
+        # Stop stepping the automatic controller; now exercise manual cooling.
+        for command in (-100, 100, -20, 0):
+            expected = max(-30, min(30, command))
+            deadline=time.monotonic()+3
+            while time.monotonic()<deadline:
+                c.client.publish(config.TOPIC_PELTIER_CMD,json.dumps({'power':command}))
+                if hw.applied_power==expected:
+                    break
+                time.sleep(.05)
+            assert hw.applied_power==expected
+        assert all(call.args[3]<=30 for call in gpio.tx_pwm.call_args_list)
+    finally:
+        hw.cleanup_gpio()
+        driver_client.disconnect()
+        driver_client.loop_stop()

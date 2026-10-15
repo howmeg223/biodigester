@@ -12,13 +12,16 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
-from mqtt_common import connect_and_start, connected_ok, make_client, read_json, read_power, send, stop_requested, limit_peltier_power
+from mqtt_common import (connect_and_start, connected_ok, make_client, read_json,
+                         read_power, send, stop_requested, limit_peltier_power,
+                         peltier_power_limit, POWER_CONTROL_VERSION)
 
 log = logging.getLogger("peltier-hardware")
 
 
 class PeltierHardwareClient:
     def __init__(self, clock=time.monotonic):
+        peltier_power_limit()  # Reject invalid limits before opening any GPIO.
         self.clock = clock
         self.client = make_client("biodigester-peltier-hardware")
         self.gpio = None
@@ -61,6 +64,9 @@ class PeltierHardwareClient:
         """
         lgpio = self._lgpio()
         log.info("Opening /dev/gpiochip%d", config.PELTIER_GPIO_CHIP)
+        log.info("%s: driver=%s config=%s maximum PWM=%.1f%% frequency=%s Hz",
+                 POWER_CONTROL_VERSION, __file__, config.__file__,
+                 peltier_power_limit(), config.PELTIER_PWM_FREQUENCY_HZ)
         self.gpio = lgpio.gpiochip_open(config.PELTIER_GPIO_CHIP)
         lgpio.gpio_claim_output(self.gpio, config.PELTIER_RPWM_PIN, 0)
         lgpio.gpio_claim_output(self.gpio, config.PELTIER_LPWM_PIN, 0)
@@ -189,9 +195,9 @@ class PeltierHardwareClient:
                 self.publish_state()
                 return
 
-            command = limit_peltier_power(command)
-            if abs(command) < config.PELTIER_DEADBAND_PERCENT:
-                command = 0.0
+            # A zero command must still turn output off if configuration is invalid.
+            if command != 0:
+                command = limit_peltier_power(command)
             new_direction = 1 if command > 0 else (-1 if command < 0 else 0)
             duty = abs(command)
 
@@ -247,6 +253,11 @@ class PeltierHardwareClient:
             "output_unknown": self.output_unknown,
             "requested_power": round(self.requested_power, 2),
             "applied_power": round(self.applied_power, 2),
+            "max_power": peltier_power_limit(),
+            "driver_version": POWER_CONTROL_VERSION,
+            "driver_file": __file__,
+            "config_file": config.__file__,
+            "pwm_frequency_hz": config.PELTIER_PWM_FREQUENCY_HZ,
             "direction": direction,
             "safety_latched": self.safety_latched,
             "watchdog_timed_out": self.watchdog_timed_out,
@@ -290,7 +301,11 @@ class PeltierHardwareClient:
 
         try:
             if message.topic == config.TOPIC_PELTIER_CMD:
-                value = read_power(data)
+                try:
+                    value = read_power(data)
+                except ValueError as exc:
+                    log.warning("Invalid Peltier MQTT command %r: %s", data, exc)
+                    return
                 with self.lock:
                     self.last_command_time = self.clock()
                     self.watchdog_timed_out = False
@@ -313,8 +328,6 @@ class PeltierHardwareClient:
                         self.watchdog_timed_out = False
                         self.last_error = None
                         self.publish_state()
-        except (KeyError, TypeError, ValueError) as exc:
-            log.warning("Invalid Peltier MQTT command %r: %s", data, exc)
         except Exception as exc:
             self.last_error = str(exc)
             self.safety_latched = True
