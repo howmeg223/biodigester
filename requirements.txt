@@ -3,3 +3,10 @@ dash>=3,<5
 pandas>=2,<4
 plotly>=6,<7
 pytest
+
+# Raspberry Pi GPIO and SH1106 OLED support.
+# Ubuntu native prerequisites: sudo apt install liblgpio-dev swig python3-dev build-essential
+lgpio>=0.2.2,<1
+luma.oled>=3.14,<4
+spidev>=3,<4
+Pillow>=10,<13
