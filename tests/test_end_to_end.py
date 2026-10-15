@@ -108,8 +108,6 @@ def test_real_mqtt_actual_driver_caps_automatic_and_manual_power(system, monkeyp
     """Exercise Pi driver callbacks and PWM arguments, rather than the simulator."""
     from unittest.mock import Mock
     from pi.peltier import PeltierHardwareClient
-    from deploy.install_power_update import verify_live
-    from pathlib import Path
     import json
 
     c,s,m,_ = system
@@ -123,13 +121,6 @@ def test_real_mqtt_actual_driver_caps_automatic_and_manual_power(system, monkeyp
     monkeypatch.setattr(PeltierHardwareClient, '_lgpio', lambda _: gpio)
     hw = PeltierHardwareClient()
     hw.setup_gpio()
-    failures = []
-    def verify():
-        try:
-            verify_live(Path(__file__).resolve().parents[1], timeout=5)
-        except Exception as exc:
-            failures.append(exc)
-    verifier = threading.Thread(target=verify, daemon=True)
     try:
         driver_client.connect(config.BROKER_HOST, config.BROKER_PORT)
         driver_client.loop_start()
@@ -143,15 +134,18 @@ def test_real_mqtt_actual_driver_caps_automatic_and_manual_power(system, monkeyp
             time.sleep(.05)
         else:
             pytest.fail(f'Automatic PWM did not reach 30: {hw.state_payload()}')
-        verifier.start()
-        deadline = time.monotonic()+8
-        while verifier.is_alive() and time.monotonic()<deadline:
-            c.client.publish(config.TOPIC_TEMPERATURE, json.dumps({'temperature':34}))
-            c.step()
+        deadline = time.monotonic()+5
+        while time.monotonic()<deadline:
             hw.publish_state()
+            _, messages, _ = m.snapshot()
+            state = messages.get(config.TOPIC_PELTIER_STATE)
+            if state and not state[2] and state[0].get('driver_file') == hw.state_payload()['driver_file']:
+                assert state[0]['applied_power'] == 30
+                assert state[0]['max_power'] == 30
+                break
             time.sleep(.05)
-        verifier.join(1)
-        assert not verifier.is_alive() and not failures, failures
+        else:
+            pytest.fail('Dashboard monitor did not receive live Pi driver feedback')
         assert 'PELTIER_POWER_MISMATCH' not in c.faults.active_codes()
         # Stop stepping the automatic controller; now exercise manual cooling.
         for command in (-100, 100, -20, 0):

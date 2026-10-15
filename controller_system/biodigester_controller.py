@@ -85,6 +85,8 @@ class BiodigesterController:
             elif msg.topic == config.TOPIC_THRESHOLDS:
                 self._handle_threshold_request(data)
             elif msg.topic == config.TOPIC_FAULT_ACK and isinstance(data, dict):
+                if getattr(msg, "retain", False):
+                    return
                 code = data.get("code", "ALL")
                 if not isinstance(code, str):
                     return

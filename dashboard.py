@@ -40,12 +40,14 @@ RANGES = {
 REPORT_SENSORS = {**config.SENSORS, "bubble_rate": {"label": "Bubble rate", "unit": "bubbles/min"}}
 
 
-def read_analysis_files():
+def read_analysis_files(include_bubbles=True):
     with lock:
         readings = read_table(monitor.log_file, ["timestamp", "sensor", "value"])
-        events = read_table(monitor.bubble_file, ["timestamp", "session", "count"])
         markers = read_table(monitor.sampling_file, ["timestamp", "event"])
-        coverage = read_table(monitor.coverage_file, ["timestamp", "available"])
+        events = (read_table(monitor.bubble_file, ["timestamp", "session", "count"])
+                  if include_bubbles else pd.DataFrame(columns=["timestamp", "session", "count"]))
+        coverage = (read_table(monitor.coverage_file, ["timestamp", "available"])
+                    if include_bubbles else pd.DataFrame(columns=["timestamp", "available"]))
     return readings, events, markers, coverage
 
 
@@ -60,7 +62,7 @@ def load_df(minutes=None, include_sampling=False):
 
 
 def report_data(keys, minutes=None, start=None, end=None, interval=1, include_sampling=False):
-    readings, events, markers, coverage = read_analysis_files()
+    readings, events, markers, coverage = read_analysis_files("bubble_rate" in keys)
     end = pd.Timestamp(end or datetime.now())
     if start is None:
         if minutes:
@@ -121,14 +123,14 @@ def empty_fig(message):
 
 def history_fig(key, minutes, limits=None):
     """Plot one sensor's history with temperature limits where applicable."""
-    df = load_df(minutes)
-    df = df[df["sensor"] == key]
+    df, periods, start, end = report_data([key], minutes)
     if key == "ph":
         return ph_figure(df, limits)
     if df.empty:
         return empty_fig("No logged data yet for this sensor")
     sensor = config.SENSORS[key]
-    fig = go.Figure(go.Scatter(x=df["timestamp"], y=df["value"], mode="lines"))
+    df = graph_samples(df, key, periods, start, end, False)
+    fig = go.Figure(go.Scatter(x=df["timestamp"], y=df["value"], mode="lines", connectgaps=False))
     fig.update_layout(height=380, margin={"t": 20},
                       yaxis_title=f"{sensor['label']} ({sensor['unit']})", uirevision=key)
     if key == "temperature":
@@ -242,6 +244,7 @@ app = Dash(__name__, title="Biodigester Monitor")
 app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "margin": "0 auto", "padding": "16px"}, children=[
     html.H2("Biodigester Monitoring Application"),
     html.Div(id="status", style={"marginBottom": "12px"}),
+    html.Div(id="logging-status", role="status", style={"color": "#b3261e"}),
     html.Div(style={"padding": "16px", "background": "#fff7e6", "borderRadius": "10px", "marginBottom": "16px"}, children=[
         html.H3("Vessel sampling"),
         html.P("Pause analysis before opening the vessel. Raw readings and alarms are still recorded; temperature control stays active. "
@@ -420,7 +423,11 @@ def pick_sensor(_):
               Input("hist-range", "value"), Input("tick", "n_intervals"), Input("ph-limits", "data"))
 def update_history(key, range_name, _, limits=None):
     sensor = config.SENSORS[key]
-    return history_fig(key, RANGES[range_name], limits), sensor["label"], sensor["description"]
+    try:
+        figure = history_fig(key, RANGES[range_name], limits)
+    except (ValueError, OSError, pd.errors.ParserError) as exc:
+        figure = empty_fig(f"Cannot read CSV history: {exc}")
+    return figure, sensor["label"], sensor["description"]
 
 
 def report_bounds(range_name, start_date, end_date, start_time, end_time):
@@ -495,6 +502,12 @@ def refresh_sampling(_):
     return "Analysis running. Sampling periods remain marked in the archive."
 
 
+@app.callback(Output("logging-status", "children"), Input("tick", "n_intervals"))
+def refresh_logging(_):
+    errors = monitor.logging_status()
+    return ("CSV logging needs attention: " + "; ".join(f"{key}: {value}" for key, value in errors.items())) if errors else ""
+
+
 @app.callback(Output("controller-status", "children"), Output("save-range", "disabled"),
               Output("sim-status", "children"), Output("fault-list", "children"),
               Output("fault-events", "children"), Input("tick", "n_intervals"))
@@ -508,9 +521,11 @@ def refresh_controller(_):
     heater_entry = messages.get(config.TOPIC_PELTIER_STATE)
     if heater_entry:
         heater, received, retained = heater_entry
-        stale = retained or not connected or time.monotonic() - received > config.TEMP_STALE_AFTER_S
+        stale = (retained or not connected or heater.get('online') is False
+                 or heater.get('output_unknown') is True
+                 or time.monotonic() - received > config.ACTUATOR_FEEDBACK_TIMEOUT_S)
         qualifier = " (saved/stale)" if stale else ""
-        cutout = "LATCHED" if heater.get("safety_latched") else "ready"
+        cutout = "unknown" if heater.get('online') is False else ("LATCHED" if heater.get("safety_latched") else "ready")
         children.append(html.Div(
             f"Peltier PWM duty: {heater.get('applied_power', '?')}%; "
             f"limit: {heater.get('max_power', 'unknown (older driver)')}%; "
@@ -585,8 +600,11 @@ def restore_ph_limits(limits):
               Input("ph-history-range", "value"))
 def refresh_ph(_, limits, range_name):
     low, high = ph_limits(limits)
-    data = load_df(RANGES[range_name])
-    figure = ph_figure(data[data["sensor"] == "ph"], limits)
+    try:
+        data = load_df(RANGES[range_name])
+        figure = ph_figure(data[data["sensor"] == "ph"], limits)
+    except (ValueError, OSError, pd.errors.ParserError) as exc:
+        figure = empty_fig(f"Cannot read pH CSV history: {exc}")
     latest, _, connected = monitor.snapshot()
     entry = latest.get("ph")
     color = "#666"

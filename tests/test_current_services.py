@@ -214,3 +214,15 @@ def test_dashboard_renders_current_service_data(monitor, monkeypatch):
     http = dashboard.app.server.test_client()
     for path in ("/", "/_dash-layout", "/_dash-dependencies"):
         assert http.get(path).status_code == 200
+
+
+def test_retained_fault_ack_cannot_request_reset():
+    controller = BiodigesterController(client=mqtt_client())
+    controller.faults.acknowledge = Mock(return_value=["TEST"])
+    message = SimpleNamespace(topic=config.TOPIC_FAULT_ACK, payload=b'{"code":"ALL"}', retain=True)
+    controller._on_message(None, None, message)
+    controller.faults.acknowledge.assert_not_called()
+    message.retain = False
+    controller._on_message(None, None, message)
+    controller.faults.acknowledge.assert_called_once()
+    assert controller._reset_requested

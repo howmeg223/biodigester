@@ -5,6 +5,7 @@ extension point for email/SMS/push integrations later, without moving detection
 out of the controller.
 """
 from collections import deque
+from threading import Lock
 
 
 class NotificationManager:
@@ -13,12 +14,14 @@ class NotificationManager:
     def __init__(self, max_events=50):
         # A deque is a list-like collection. When full, it drops the oldest event.
         self._events = deque(maxlen=max_events)
+        self._lock = Lock()
 
     def process(self, event, timestamp):
         """Save an event without changing the original dictionary."""
         saved_event = dict(event)
         saved_event["received_at"] = timestamp
-        self._events.appendleft(saved_event)
+        with self._lock:
+            self._events.appendleft(saved_event)
 
         # Clearing or acknowledging a fault is recorded without printing an alert.
         if event.get("event") in ("RAISED", "REASSERTED"):
@@ -30,4 +33,5 @@ class NotificationManager:
 
     def recent(self):
         """Return a list so the dashboard can select the events to display."""
-        return list(self._events)
+        with self._lock:
+            return list(self._events)

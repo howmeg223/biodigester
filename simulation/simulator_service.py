@@ -3,7 +3,7 @@ import threading
 import time
 
 import config
-from mqtt_common import connected_ok, read_json, read_power, send, limit_peltier_power
+from mqtt_common import connected_ok, read_json, read_power, send
 from simulation.devices import SimulatedHeater, SimulatedPressureSensor, SimulatedTemperatureSensor
 from simulation.digester_model import DigesterModel, ambient_temperature
 from simulation.fault_injector import FaultInjector
@@ -59,7 +59,7 @@ class SimulatorService:
         with self.lock:
             if msg.topic == config.TOPIC_PELTIER_CMD:
                 try:
-                    self.heater.command(limit_peltier_power(read_power(data)))
+                    self.heater.command(read_power(data))
                 except ValueError:
                     return
             elif msg.topic == config.TOPIC_PELTIER_SAFETY_CMD:

@@ -8,6 +8,7 @@ import csv
 from datetime import datetime, timedelta
 from pathlib import Path
 import json
+import logging
 import math
 import threading
 import time
@@ -18,6 +19,8 @@ from controller_system.temperature_control import check_thresholds
 from monitoring.data_logger import DataLogger
 from monitoring.notification_manager import NotificationManager
 from mqtt_common import connected_ok, make_client, read_power
+
+log = logging.getLogger(__name__)
 
 
 class MonitoringService:
@@ -30,6 +33,7 @@ class MonitoringService:
         self.latest = {}
         self.ph_simulated = False
         self.log_enabled = log_enabled
+        self.logging_errors = {}
         self.sampling_file = Path(sampling_file or Path(reading_file).parent / "sampling_events.csv")
         self.coverage_file = Path(coverage_file or Path(reading_file).parent / "bubble_coverage.csv")
         self.sampling_paused = False
@@ -104,8 +108,9 @@ class MonitoringService:
                     self.ph_simulated = data.get("simulated") is True
                 if not retained and self.log_enabled:
                     excluded = self.sampling_status()["paused"] and source != "manual"
-                    self.logger.log_reading(measured_at, key, value, source, sample_id, excluded)
-                    if sample_id:
+                    saved = self._write_log('readings', self.logger.log_reading,
+                                            measured_at, key, value, source, sample_id, excluded)
+                    if sample_id and saved:
                         self._remember_reading(sample_id)
                 return
 
@@ -113,7 +118,7 @@ class MonitoringService:
                 if isinstance(data, dict) and isinstance(data.get("code"), str):
                     self.notifications.process(data, timestamp)
                     if self.log_enabled:
-                        self.logger.log_fault_event(timestamp, data)
+                        self._write_log('faults', self.logger.log_fault_event, timestamp, data)
                 return
 
             if topic == config.TOPIC_BUBBLE_EVENT:
@@ -132,7 +137,7 @@ class MonitoringService:
                 self.bubble_events.append(received_at)
                 self.last_bubble = timestamp
                 if self.log_enabled:
-                    self.logger.log_bubble_event(self.bubble_file, timestamp, data)
+                    self._write_log('bubbles', self.logger.log_bubble_event, self.bubble_file, timestamp, data)
             elif topic == config.TOPIC_BUBBLE:
                 if not isinstance(data, dict) or data.get("bubble") not in (True, False, 0, 1):
                     return
@@ -171,7 +176,8 @@ class MonitoringService:
                     return
                 if data.get("online") is not False:
                     try:
-                        read_power(data, "applied_power")
+                        data = dict(data)
+                        data["applied_power"] = read_power(data, "applied_power")
                     except ValueError:
                         return
                     if not isinstance(data.get("safety_latched"), bool):
@@ -200,15 +206,27 @@ class MonitoringService:
         try:
             with self.sampling_file.open(newline="", encoding="utf-8") as stream:
                 for row in csv.DictReader(stream):
-                    if row["event"] == "PAUSE":
+                    if row.get("event") == "PAUSE":
                         self.sampling_paused = True
                         self.sampling_resume_at = None
-                    elif row["event"] == "RESUME":
+                    elif row.get("event") == "RESUME":
+                        try:
+                            resume_at = datetime.fromisoformat(row.get("resume_at") or row.get("timestamp") or '')
+                            if resume_at.tzinfo:
+                                resume_at = resume_at.astimezone().replace(tzinfo=None)
+                        except (ValueError, TypeError, OverflowError) as exc:
+                            self._log_error('sampling history', exc)
+                            continue
                         self.sampling_paused = False
-                        self.sampling_resume_at = datetime.fromisoformat(row["resume_at"] or row["timestamp"])
+                        self.sampling_resume_at = resume_at
+                    else:
+                        self._log_error('sampling history', 'Missing or unknown sampling event in CSV')
+                        continue
                     self.sampling_reason = row.get("reason", "")
         except FileNotFoundError:
             pass
+        except (OSError, ValueError, csv.Error) as exc:
+            self._log_error('sampling history', exc)
         try:
             with self.log_file.open(newline="", encoding="utf-8") as stream:
                 ids = deque((row.get("sample_id") for row in csv.DictReader(stream) if row.get("sample_id")), maxlen=10000)
@@ -216,15 +234,37 @@ class MonitoringService:
                     self._remember_reading(sample_id)
         except FileNotFoundError:
             pass
+        except (OSError, ValueError, csv.Error) as exc:
+            self._log_error('readings history', exc)
+
+    def _log_error(self, key, error):
+        message = str(error)
+        if self.logging_errors.get(key) != message:
+            log.error("CSV %s: %s", key, message)
+        self.logging_errors[key] = message
+
+    def _write_log(self, key, operation, *args):
+        """A disk error must not kill MQTT reception or hide live measurements."""
+        try:
+            operation(*args)
+        except (OSError, ValueError, csv.Error) as exc:
+            self._log_error(key, exc)
+            return False
+        self.logging_errors.pop(key, None)
+        return True
+
+    def logging_status(self):
+        with self.lock:
+            return dict(self.logging_errors)
 
     def _record_coverage(self, timestamp, available):
         if not self.log_enabled:
             return
         if (available != self._last_coverage_available or self._last_coverage_at is None or
                 (timestamp-self._last_coverage_at).total_seconds() >= 1):
-            self.logger.log_coverage(self.coverage_file, timestamp, available)
-            self._last_coverage_at = timestamp
-            self._last_coverage_available = available
+            if self._write_log('coverage', self.logger.log_coverage, self.coverage_file, timestamp, available):
+                self._last_coverage_at = timestamp
+                self._last_coverage_available = available
 
     def sampling_status(self):
         with self.lock:
@@ -251,8 +291,10 @@ class MonitoringService:
             if not paused and not state["paused"]:
                 return "Analysis is already running."
             resume_at = None if paused else now + timedelta(seconds=settle_s)
-            self.logger.log_sampling_event(self.sampling_file, now, "PAUSE" if paused else "RESUME",
-                reason, resume_at.isoformat(timespec="milliseconds") if resume_at else "")
+            if not self._write_log('sampling', self.logger.log_sampling_event, self.sampling_file,
+                    now, "PAUSE" if paused else "RESUME", reason,
+                    resume_at.isoformat(timespec="milliseconds") if resume_at else ""):
+                return "Sampling state unchanged: could not save the sampling marker. Check CSV logging status."
             self.sampling_paused = paused
             self.sampling_resume_at = resume_at
             self.sampling_reason = reason

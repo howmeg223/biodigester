@@ -9,4 +9,4 @@ pytest
 lgpio>=0.2.2,<1
 luma.oled>=3.14,<4
 spidev>=3,<4
-Pillow>=10,<13
+Pillow>=10.1,<13

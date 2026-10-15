@@ -162,7 +162,7 @@ updates arrive. Retained temperature/output reports cannot authorize heating.
 | `sensors/bubble` | `{"bubble":true,"count":52,"session":"unique-process-id","ready":true}` |
 | `events/bubble` | `{"event":"bubble","count":52,"session":"unique-process-id","drop":15000,"threshold":10000}` |
 | `peltier/cmd` | `{"power":100}` |
-| `peltier/state` | `{"online":true,"requested_power":100,"applied_power":100,"direction":"POSITIVE","safety_latched":false,"watchdog_timed_out":false,"last_error":null}` |
+| `peltier/state` | `{"online":true,"requested_power":100,"applied_power":30,"max_power":30,"direction":"POSITIVE","safety_latched":false,"watchdog_timed_out":false,"last_error":null}` |
 | `peltier/safety` | `{"action":"TRIP"}` or `{"action":"RESET"}` |
 | `control/thresholds` | `{"low":35,"high":37}` |
 | `control/status` | Controller mode, temperature, thresholds and fault list |

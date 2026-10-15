@@ -29,7 +29,10 @@ def sampling_intervals(markers, end=None):
             if opened is None:
                 opened = row.timestamp
         elif row.event == "RESUME" and opened is not None:
-            resume = pd.to_datetime(getattr(row, "resume_at", None), errors="coerce")
+            raw_resume = getattr(row, "resume_at", None)
+            resume = pd.to_datetime(raw_resume, errors="coerce")
+            if pd.isna(resume) and pd.notna(raw_resume) and str(raw_resume).strip():
+                raise ValueError("Invalid resume_at in sampling_events.csv; repair the sampling marker before reporting")
             if pd.isna(resume): resume = row.timestamp
             if resume > opened: intervals.append((opened, resume))
             opened = None

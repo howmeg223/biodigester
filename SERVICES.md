@@ -14,10 +14,10 @@ Copy the service update files into your repository, then run:
 
 ```bash
 cd ~/biodigester
-sudo apt install mosquitto python3-venv python3-dev build-essential swig
+sudo apt install mosquitto python3-venv python3-dev build-essential swig liblgpio-dev
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-pi.txt
-sudo usermod -aG gpio,spi pi
+# Add pi to the groups owning the GPIO/SPI devices (see note below).
 sudo cp deploy/biodigester@.service deploy/biodigester.target /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now mosquitto.service
@@ -28,6 +28,9 @@ No interactive virtual-environment activation is needed: the script uses
 `/home/pi/biodigester/.venv/bin/python` directly. The system service runs as `pi`,
 so existing CSV files must be writable by that user. SPI and 1-Wire must already
 be enabled, and the hardware must be wired and configured as in HARDWARE.md.
+Check `ls -l /dev/gpiochip* /dev/spidev*` and add `pi` to the owning device
+groups with `sudo usermod -aG GROUP pi`. Raspberry Pi OS commonly uses `gpio`
+and `spi`; your Ubuntu SPI devices may use `dialout`. Only add groups that exist.
 If you use I2C for the OLED, also give `pi` membership in the `i2c` group.
 Group membership is loaded when each system service starts.
 
