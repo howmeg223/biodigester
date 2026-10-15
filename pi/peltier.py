@@ -12,7 +12,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
-from mqtt_common import connect_and_start, connected_ok, make_client, read_json, read_power, send, stop_requested
+from mqtt_common import connect_and_start, connected_ok, make_client, read_json, read_power, send, stop_requested, limit_peltier_power
 
 log = logging.getLogger("peltier-hardware")
 
@@ -189,6 +189,9 @@ class PeltierHardwareClient:
                 self.publish_state()
                 return
 
+            command = limit_peltier_power(command)
+            if abs(command) < config.PELTIER_DEADBAND_PERCENT:
+                command = 0.0
             new_direction = 1 if command > 0 else (-1 if command < 0 else 0)
             duty = abs(command)
 

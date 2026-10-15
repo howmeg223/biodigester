@@ -79,6 +79,19 @@ def read_power(data, key="power"):
     return value
 
 
+def limit_peltier_power(power):
+    """Cap signed PWM duty; older Pi configurations default to a 30% cap."""
+    import math
+    limit = getattr(config, "PELTIER_MAX_POWER", 30.0)
+    if isinstance(limit, bool):
+        raise ValueError("PELTIER_MAX_POWER must be numeric and between 0 and 100")
+    limit = float(limit)
+    if not math.isfinite(limit) or not 0 <= limit <= 100:
+        raise ValueError("PELTIER_MAX_POWER must be finite and between 0 and 100")
+    power = read_power({"power": power})
+    return max(-limit, min(limit, power))
+
+
 def stop_requested(signum, frame):
     """Let hardware main loops run their finally cleanup on SIGTERM."""
     raise KeyboardInterrupt

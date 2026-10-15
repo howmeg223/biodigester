@@ -10,7 +10,7 @@ from controller_system.heater_monitor import HeaterMonitor
 from controller_system.process_monitor import ProcessMonitor
 from controller_system.sensor_monitor import TemperatureSensorMonitor
 from controller_system.temperature_control import TemperatureController
-from mqtt_common import connected_ok, read_json, read_power, send
+from mqtt_common import connected_ok, read_json, read_power, send, limit_peltier_power
 
 
 class BiodigesterController:
@@ -142,7 +142,7 @@ class BiodigesterController:
                 temperature_c=sensor_health.value,
                 temperature_trustworthy=sensor_health.trustworthy,
                 safety_cutout=self.safety_cutout,
-                commanded_power=config.PELTIER_HEAT_POWER if self.temperature_control.heating else 0.0,
+                commanded_power=limit_peltier_power(config.PELTIER_HEAT_POWER) if self.temperature_control.heating else 0.0,
                 applied_power=self.applied_power if feedback_fresh else None,
             )
             for code, condition in heater_conditions.items():
@@ -167,7 +167,7 @@ class BiodigesterController:
                 heating_allowed=feedback_fresh and not self.faults.heating_inhibited(),
             )
             send(self.client, config.TOPIC_PELTIER_CMD,
-                 {"power": config.PELTIER_HEAT_POWER if decision.heating else 0.0})
+                 {"power": limit_peltier_power(config.PELTIER_HEAT_POWER) if decision.heating else 0.0})
 
             # 4. Tell the dashboard about fault changes and the current state.
             events = self.faults.pop_events()
@@ -186,7 +186,7 @@ class BiodigesterController:
             status = {
                 "mode": mode,
                 "heating": decision.heating,
-                "commanded_power": config.PELTIER_HEAT_POWER if decision.heating else 0.0,
+                "commanded_power": limit_peltier_power(config.PELTIER_HEAT_POWER) if decision.heating else 0.0,
                 "reason": decision.reason,
                 "temperature": sensor_health.value,
                 "temperature_age_s": sensor_health.age_s,
