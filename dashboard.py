@@ -5,6 +5,7 @@ presents fault notifications/history, and sends operator requests such as range
 changes, acknowledgements, or simulator-only fault injections.
 """
 import argparse
+import logging
 import math
 from datetime import datetime, timedelta
 import signal
@@ -20,12 +21,15 @@ from plotly.subplots import make_subplots
 
 import config
 from monitoring.monitoring_service import MonitoringService
+from monitoring.archive_cache import ArchiveCache
 from monitoring.ph_monitor import classify, validate_limits
 from monitoring.reporting import read_table, sampling_intervals, analysis_readings, bubble_rate
 from mqtt_common import stop_requested
 
 monitor = MonitoringService()
-lock = monitor.lock
+lock = monitor.lock  # Compatibility for callers; archive work never acquires it.
+archive_cache = ArchiveCache(getattr(config, "DASHBOARD_ARCHIVE_CACHE_S", 10))
+DASHBOARD_VERSION = "live-archive-v3"
 
 RANGES = {
     "Latest logged 24 hours": "latest",
@@ -41,14 +45,18 @@ RANGES = {
 REPORT_SENSORS = {**config.SENSORS, "bubble_rate": {"label": "Bubble rate", "unit": "bubbles/min"}}
 
 
-def read_analysis_files(include_bubbles=True):
-    with lock:
-        readings = read_table(monitor.log_file, ["timestamp", "sensor", "value"])
-        markers = read_table(monitor.sampling_file, ["timestamp", "event"])
-        events = (read_table(monitor.bubble_file, ["timestamp", "session", "count"])
-                  if include_bubbles else pd.DataFrame(columns=["timestamp", "session", "count"]))
-        coverage = (read_table(monitor.coverage_file, ["timestamp", "available"])
-                    if include_bubbles else pd.DataFrame(columns=["timestamp", "available"]))
+def read_analysis_files(include_bubbles=True, refresh=False):
+    def load(path, columns):
+        return archive_cache.read(path, columns,
+            lambda path, columns: read_table(path, columns, file_lock=monitor.logger.file_lock), refresh)
+    # Never acquire monitor.lock while reading or parsing archives. It protects
+    # the live MQTT state, not potentially large files.
+    readings = load(monitor.log_file, ["timestamp", "sensor", "value"])
+    markers = load(monitor.sampling_file, ["timestamp", "event"])
+    events = (load(monitor.bubble_file, ["timestamp", "session", "count"])
+              if include_bubbles else pd.DataFrame(columns=["timestamp", "session", "count"]))
+    coverage = (load(monitor.coverage_file, ["timestamp", "available"])
+                if include_bubbles else pd.DataFrame(columns=["timestamp", "available"]))
     return readings, events, markers, coverage
 
 
@@ -57,8 +65,8 @@ def load_df(minutes=None, include_sampling=False, keys=None):
                        include_sampling=include_sampling)[0]
 
 
-def report_data(keys, minutes=None, start=None, end=None, interval="auto", include_sampling=False):
-    readings, events, markers, coverage = read_analysis_files("bubble_rate" in keys)
+def report_data(keys, minutes=None, start=None, end=None, interval="auto", include_sampling=False, refresh=False):
+    readings, events, markers, coverage = read_analysis_files("bubble_rate" in keys, refresh)
     selected = readings[readings.sensor.isin(keys)]
     archives = (selected, events, coverage) if "bubble_rate" in keys else (selected,)
     archives = [frame for frame in archives if not frame.empty]
@@ -82,7 +90,10 @@ def report_data(keys, minutes=None, start=None, end=None, interval="auto", inclu
     if start >= end:
         raise ValueError("Start must be before end")
     periods = sampling_intervals(markers, end)
-    df = analysis_readings(readings, periods, include_sampling)
+    # Select before copying/converting analysis metadata, especially for the
+    # pH graph, which otherwise processes every pressure/temperature sample.
+    df = analysis_readings(selected[(selected.timestamp >= start) & (selected.timestamp < end)],
+                           periods, include_sampling)
     df = df[df.sensor.isin(keys) & (df.timestamp >= start) & (df.timestamp < end)]
     effective_interval = None
     if "bubble_rate" in keys:
@@ -158,12 +169,12 @@ def history_fig(key, minutes, limits=None):
     return fig
 
 
-def report_fig(keys, minutes, limits=None, start=None, end=None, interval="auto", include_sampling=False):
+def report_fig(keys, minutes, limits=None, start=None, end=None, interval="auto", include_sampling=False, refresh=False):
     """Compare CSV histories on separate axes, including calculated bubble rates."""
     keys = [key for key in dict.fromkeys(keys or []) if key in REPORT_SENSORS]
     if not keys:
         return empty_fig("Tick at least one sensor")
-    df, periods, start, end = report_data(keys, minutes, start, end, interval, include_sampling)
+    df, periods, start, end = report_data(keys, minutes, start, end, interval, include_sampling, refresh)
     if df.empty or not df.value.notna().any():
         return empty_fig("No logged data or confirmed bubble coverage in this time range")
     fig = make_subplots(rows=len(keys), cols=1, shared_xaxes=True, vertical_spacing=0.06)
@@ -260,6 +271,7 @@ app = Dash(__name__, title="Biodigester Monitor")
 # controls to callbacks, which run when their Input values change.
 app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "margin": "0 auto", "padding": "16px"}, children=[
     html.H2("Biodigester Monitoring Application"),
+    html.Small(f"Dashboard {DASHBOARD_VERSION}", id="dashboard-version"),
     html.Div(id="status", style={"marginBottom": "12px"}),
     html.Div(id="logging-status", role="status", style={"color": "#b3261e"}),
     html.Div(id="archive-status", role="status", style={"color": "#b45309", "marginBottom": "8px"}),
@@ -350,6 +362,7 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
     ]),
 
     dcc.Interval(id="tick", interval=2000),
+    dcc.Interval(id="graph-tick", interval=int(getattr(config, "DASHBOARD_GRAPH_REFRESH_S", 30) * 1000)),
     dcc.Store(id="selected", data=first_key),
     dcc.Tabs([
         dcc.Tab(label="Sensor history", children=[
@@ -421,7 +434,13 @@ def refresh_cards(_):
             stamps.append(stamp.strftime("stale; last update %H:%M:%S"))
         else:
             stamps.append(stamp.strftime("updated %H:%M:%S"))
-    return values, stamps, ("● Connected to broker" if connected else "○ Not connected to broker")
+    status = "● Connected to broker" if connected else "○ Not connected to broker"
+    receiver = monitor.receiver_status()
+    if connected and receiver["error"]:
+        status += " · message processing error; see logging status"
+    elif connected and receiver["last_message_age"] is not None and receiver["last_message_age"] > max(10, config.KEEPALIVE_S * 2):
+        status += f" · no MQTT messages for {receiver['last_message_age']:.0f} seconds"
+    return values, stamps, status
 
 
 @app.callback(Output("selected", "data"), Output({"type": "card", "key": ALL}, "style"),
@@ -442,12 +461,12 @@ def pick_sensor(_):
 
 @app.callback(Output("hist-graph", "figure"), Output("sensor-title", "children"),
               Output("sensor-desc", "children"), Input("selected", "data"),
-              Input("hist-range", "value"), Input("tick", "n_intervals"), Input("ph-limits", "data"))
+              Input("hist-range", "value"), Input("graph-tick", "n_intervals"), Input("ph-limits", "data"))
 def update_history(key, range_name, _, limits=None):
     sensor = config.SENSORS[key]
     try:
         figure = history_fig(key, RANGES[range_name], limits)
-    except (ValueError, OSError, pd.errors.ParserError) as exc:
+    except (KeyError, ValueError, OSError, pd.errors.ParserError) as exc:
         figure = empty_fig(f"Cannot read CSV history: {exc}")
     return figure, sensor["label"], sensor["description"]
 
@@ -478,8 +497,8 @@ def update_report(keys, range_name, _, limits=None, start_date=None, end_date=No
                   start_time="00:00", end_time="23:59", interval="auto", include=None):
     try:
         minutes, start, end = report_bounds(range_name, start_date, end_date, start_time, end_time)
-        return report_fig(keys, minutes, limits, start, end, interval, "include" in (include or [])), ""
-    except (ValueError, OSError, pd.errors.ParserError) as error:
+        return report_fig(keys, minutes, limits, start, end, interval, "include" in (include or []), refresh=True), ""
+    except (KeyError, ValueError, OSError, pd.errors.ParserError) as error:
         return empty_fig("Cannot generate report"), str(error)
 
 
@@ -493,7 +512,7 @@ def download_report(_, keys, range_name, start_date, end_date, start_time, end_t
         minutes, start, end = report_bounds(range_name, start_date, end_date, start_time, end_time)
         keys = [key for key in (keys or []) if key in REPORT_SENSORS]
         if not keys: return no_update
-        data, _, _, _ = report_data(keys, minutes, start, end, interval, "include" in (include or []))
+        data, _, _, _ = report_data(keys, minutes, start, end, interval, "include" in (include or []), refresh=True)
         return dcc.send_data_frame(data.to_csv, "biodigester-report.csv", index=False)
     except (ValueError, OSError, pd.errors.ParserError):
         return no_update
@@ -629,18 +648,22 @@ def restore_ph_limits(limits):
     return ph_limits(limits)
 
 
-@app.callback(Output("ph-notification", "children"), Output("ph-graph", "figure"),
-              Output({"type": "val", "key": "ph"}, "style"),
-              Input("tick", "n_intervals"), Input("ph-limits", "data"),
-              Input("ph-history-range", "value"))
-def refresh_ph(_, limits, range_name):
-    low, high = ph_limits(limits)
+@app.callback(Output("ph-graph", "figure"), Input("graph-tick", "n_intervals"),
+              Input("ph-limits", "data"), Input("ph-history-range", "value"))
+def refresh_ph_graph(_, limits, range_name, refresh=False):
     try:
-        data = load_df(RANGES[range_name], keys=["ph"])
+        data = report_data(["ph"], RANGES[range_name], refresh=refresh)[0]
         figure = ph_figure(data[data["sensor"] == "ph"], limits)
         figure.update_layout(uirevision=f"ph:{range_name}")
-    except (ValueError, OSError, pd.errors.ParserError) as exc:
+    except (KeyError, ValueError, OSError, pd.errors.ParserError) as exc:
         figure = empty_fig(f"Cannot read pH CSV history: {exc}")
+    return figure
+
+
+@app.callback(Output("ph-notification", "children"), Output({"type": "val", "key": "ph"}, "style"),
+              Input("tick", "n_intervals"), Input("ph-limits", "data"))
+def refresh_ph_status(_, limits):
+    low, high = ph_limits(limits)
     latest, _, connected = monitor.snapshot()
     entry = latest.get("ph")
     color = "#666"
@@ -661,8 +684,14 @@ def refresh_ph(_, limits, range_name):
             if not connected or time.monotonic() - received > config.PH_STALE_AFTER_S:
                 message += " No recent pH reading; this status describes the last measurement only."
                 color = "#666"
-    return html.Strong(message, style={"color": color}), figure, {
+    return html.Strong(message, style={"color": color}), {
         "fontSize": "28px", "margin": "4px 0", "color": color}
+
+
+def refresh_ph(tick, limits, range_name):
+    """Combined helper retained for callers; live HTTP updates use no CSV IO."""
+    message, style = refresh_ph_status(tick, limits)
+    return message, refresh_ph_graph(tick, limits, range_name, refresh=True), style
 
 
 @app.callback(Output("pressure-status", "children"), Output("bubble-status", "children"),
@@ -679,6 +708,9 @@ def refresh_bubbles(_):
 
 def main():
     """Start the browser app and optionally start its demo processes."""
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger(__name__).info("Dashboard %s; source=%s; sensor CSV=%s",
+                                    DASHBOARD_VERSION, Path(__file__).resolve(), monitor.log_file)
     parser = argparse.ArgumentParser(description="Biodigester monitoring dashboard")
     parser.add_argument("--demo", action="store_true",
                         help="start controller and simulator as child processes")

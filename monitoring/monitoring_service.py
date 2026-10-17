@@ -10,6 +10,7 @@ from pathlib import Path
 import json
 import logging
 import math
+import queue
 import threading
 import time
 import uuid
@@ -34,6 +35,13 @@ class MonitoringService:
         self.ph_simulated = False
         self.log_enabled = log_enabled
         self.logging_errors = {}
+        self._log_queue = queue.Queue(maxsize=getattr(config, "MONITOR_LOG_QUEUE_SIZE", 10000))
+        self._log_thread = None
+        self._log_stop = threading.Event()
+        self._log_busy_since = None
+        self._receiver_error = None
+        self._last_message_at = None
+        self._sampling_action_lock = threading.Lock()
         self.sampling_file = Path(sampling_file or Path(reading_file).parent / "sampling_events.csv")
         self.coverage_file = Path(coverage_file or Path(reading_file).parent / "bubble_coverage.csv")
         self.sampling_paused = False
@@ -108,7 +116,7 @@ class MonitoringService:
                     self.ph_simulated = data.get("simulated") is True
                 if not retained and self.log_enabled:
                     excluded = self.sampling_status()["paused"] and source != "manual"
-                    saved = self._write_log('readings', self.logger.log_reading,
+                    saved = self._submit_log('readings', self.logger.log_reading,
                                             measured_at, key, value, source, sample_id, excluded)
                     if sample_id and saved:
                         self._remember_reading(sample_id)
@@ -118,7 +126,7 @@ class MonitoringService:
                 if isinstance(data, dict) and isinstance(data.get("code"), str):
                     self.notifications.process(data, timestamp)
                     if self.log_enabled:
-                        self._write_log('faults', self.logger.log_fault_event, timestamp, data)
+                        self._submit_log('faults', self.logger.log_fault_event, timestamp, data)
                 return
 
             if topic == config.TOPIC_BUBBLE_EVENT:
@@ -137,7 +145,7 @@ class MonitoringService:
                 self.bubble_events.append(received_at)
                 self.last_bubble = timestamp
                 if self.log_enabled:
-                    self._write_log('bubbles', self.logger.log_bubble_event, self.bubble_file, timestamp, data)
+                    self._submit_log('bubbles', self.logger.log_bubble_event, self.bubble_file, timestamp, data)
             elif topic == config.TOPIC_BUBBLE:
                 if not isinstance(data, dict) or data.get("bubble") not in (True, False, 0, 1):
                     return
@@ -239,30 +247,64 @@ class MonitoringService:
 
     def _log_error(self, key, error):
         message = str(error)
-        if self.logging_errors.get(key) != message:
-            log.error("CSV %s: %s", key, message)
-        self.logging_errors[key] = message
+        with self.lock:
+            if self.logging_errors.get(key) != message:
+                log.error("CSV %s: %s", key, message)
+            self.logging_errors[key] = message
+
+    def _submit_log(self, key, operation, *args):
+        # Services started with start() use a dedicated writer. Direct callers
+        # without a running service retain synchronous logging semantics.
+        if self._log_thread is None:
+            return self._write_log(key, operation, *args)
+        try:
+            self._log_queue.put_nowait((key, operation, args))
+        except queue.Full:
+            self._log_error('queue', 'CSV queue is full; some new measurements were not saved. Live readings continue.')
+            return False
+        return True
+
+    def _log_worker(self):
+        while not self._log_stop.is_set() or not self._log_queue.empty():
+            try:
+                key, operation, args = self._log_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            with self.lock:
+                self._log_busy_since = time.monotonic()
+            try:
+                self._write_log(key, operation, *args)
+            finally:
+                with self.lock:
+                    self._log_busy_since = None
+                self._log_queue.task_done()
 
     def _write_log(self, key, operation, *args):
         """A disk error must not kill MQTT reception or hide live measurements."""
         try:
             operation(*args)
-        except (OSError, ValueError, csv.Error) as exc:
+        except Exception as exc:
             self._log_error(key, exc)
             return False
-        self.logging_errors.pop(key, None)
+        with self.lock:
+            self.logging_errors.pop(key, None)
         return True
 
     def logging_status(self):
         with self.lock:
-            return dict(self.logging_errors)
+            errors = dict(self.logging_errors)
+            if self._log_busy_since is not None and time.monotonic() - self._log_busy_since > 10:
+                errors['writer'] = f"CSV write delayed; {self._log_queue.qsize()} records queued. Live readings continue."
+            if self._receiver_error:
+                errors['MQTT receiver'] = self._receiver_error
+            return errors
 
     def _record_coverage(self, timestamp, available):
         if not self.log_enabled:
             return
         if (available != self._last_coverage_available or self._last_coverage_at is None or
                 (timestamp-self._last_coverage_at).total_seconds() >= 1):
-            if self._write_log('coverage', self.logger.log_coverage, self.coverage_file, timestamp, available):
+            if self._submit_log('coverage', self.logger.log_coverage, self.coverage_file, timestamp, available):
                 self._last_coverage_at = timestamp
                 self._last_coverage_available = available
 
@@ -281,7 +323,7 @@ class MonitoringService:
             return "Settling time must be between 0 and 3600 seconds."
         if not isinstance(reason, str) or len(reason) > 500:
             return "Use a sampling note of at most 500 characters."
-        with self.lock:
+        with self._sampling_action_lock:
             now = datetime.now()
             state = self.sampling_status()
             if paused and self.sampling_paused:
@@ -295,9 +337,10 @@ class MonitoringService:
                     now, "PAUSE" if paused else "RESUME", reason,
                     resume_at.isoformat(timespec="milliseconds") if resume_at else ""):
                 return "Sampling state unchanged: could not save the sampling marker. Check CSV logging status."
-            self.sampling_paused = paused
-            self.sampling_resume_at = resume_at
-            self.sampling_reason = reason
+            with self.lock:
+                self.sampling_paused = paused
+                self.sampling_resume_at = resume_at
+                self.sampling_reason = reason
             if paused:
                 return "Sampling period marked. Raw logging and temperature control continue."
             error = self.publish(getattr(config, "TOPIC_BUBBLE_RESET", f"{config.ROOT}/sensors/bubble/reset"), {"action": "RELEARN"}, retain=False)
@@ -334,7 +377,13 @@ class MonitoringService:
     def snapshot(self):
         """Copy shared dictionaries while holding the lock."""
         with self.lock:
-            return dict(self.latest), dict(self.messages), self.connected
+            connected = self.connected and (self.client is None or self.client.is_connected())
+            return dict(self.latest), dict(self.messages), bool(connected)
+
+    def receiver_status(self):
+        with self.lock:
+            age = None if self._last_message_at is None else time.monotonic() - self._last_message_at
+            return {"last_message_age": age, "error": self._receiver_error}
 
     def controller_status(self):
         """Show OFFLINE until a recent, live controller message is available."""
@@ -386,6 +435,13 @@ class MonitoringService:
 
     def start(self):
         """Start receiving messages in the MQTT client's background thread."""
+        if self.client is not None or self._log_thread is not None:
+            raise RuntimeError("Monitoring service is already started")
+        if self.log_enabled:
+            self._log_stop.clear()
+            self._log_thread = threading.Thread(target=self._log_worker,
+                                                name="biodigester-csv-writer", daemon=True)
+            self._log_thread.start()
         client = make_client(f"biodigester-dashboard-{uuid.uuid4().hex[:8]}")
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
@@ -421,12 +477,35 @@ class MonitoringService:
             self._record_coverage(datetime.now(), False)
 
     def _on_message(self, client, userdata, message):
-        self.handle_message(message.topic, message.payload, bool(message.retain))
+        # A processing failure must not terminate Paho's receiving thread and
+        # leave the page displaying a permanently frozen "Connected" state.
+        with self.lock:
+            self._last_message_at = time.monotonic()
+        try:
+            self.handle_message(message.topic, message.payload, bool(message.retain))
+        except Exception as exc:
+            with self.lock:
+                self._receiver_error = f"Could not process {message.topic}: {exc}"
+            log.exception("MQTT message processing failed for %s; receiver continues", message.topic)
+        else:
+            with self.lock:
+                self._receiver_error = None
 
     def stop(self):
         if self.client:
             self.client.disconnect()
             self.client.loop_stop()
+            self.client = None
+        with self.lock:
+            self.connected = False
+        self._log_stop.set()
+        if self._log_thread is not None:
+            self._log_thread.join(timeout=5)
+            if self._log_thread.is_alive():
+                log.error("CSV writer did not drain before shutdown; %s records pending",
+                          self._log_queue.qsize())
+            else:
+                self._log_thread = None
 
     def publish(self, topic, data, retain=False):
         """Return an error message if sending fails, or None if it succeeds."""
@@ -441,6 +520,8 @@ class MonitoringService:
         problem = check_thresholds(low, high)
         if problem:
             return problem
+        if self.client is not None and not self.client.is_connected():
+            return "Not connected to the broker. Nothing was sent."
         if self.controller_status().get("mode") == "OFFLINE":
             return "Wait for a live controller before changing the range."
         error = self.publish(

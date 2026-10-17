@@ -104,6 +104,61 @@ def test_real_mqtt_heating_bad_sensor_safety_ack_and_watchdog(system):
     assert not c.temperature_control.heating
 
 
+def test_real_mqtt_and_http_graphs_with_350000_archive_rows(system, monkeypatch):
+    """Exercise actual MQTT reception, CSV appends and concurrent Dash requests."""
+    import csv
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+    import dashboard
+    from monitoring.archive_cache import ArchiveCache
+    from test_dashboard_integration import callback_request
+
+    controller, _, monitor, _ = system
+    with monitor._log_queue.all_tasks_done:
+        assert monitor._log_queue.all_tasks_done.wait_for(
+            lambda: monitor._log_queue.unfinished_tasks == 0, timeout=3)
+    with monitor.logger.file_lock:
+        with monitor.log_file.open('w', newline='') as stream:
+            writer = csv.writer(stream)
+            writer.writerow(['timestamp', 'sensor', 'value', 'source', 'sample_id', 'excluded'])
+            writer.writerows(('2026-10-17T10:00:00', 'pressure', 1.25, 'sensor', '', False)
+                             for _ in range(349999))
+            writer.writerow(['2026-10-17T10:00:00', 'temperature', 29.125, 'sensor', '', False])
+    monkeypatch.setattr(dashboard, 'monitor', monitor)
+    monkeypatch.setattr(dashboard, 'archive_cache', ArchiveCache())
+    history_key = next(key for key in dashboard.app.callback_map if 'hist-graph.figure' in key)
+    failures = []
+    def publish():
+        try:
+            for i in range(30):
+                controller.client.publish(config.TOPIC_TEMPERATURE,
+                    json.dumps({'temperature': 29 + i / 1000}), qos=1).wait_for_publish(timeout=2)
+                time.sleep(.02)
+        except Exception as exc:
+            failures.append(exc)
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(callback_request, dashboard, key)
+                   for key in (history_key, 'ph-graph.figure', history_key)]
+        assert all(future.result(timeout=10).status_code == 200 for future in futures)
+    publisher.join(5)
+    assert not publisher.is_alive() and not failures
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if monitor.snapshot()[0].get('temperature', (None,))[0] == 29.029:
+            break
+        time.sleep(.02)
+    assert monitor.snapshot()[0]['temperature'][0] == 29.029
+    with monitor._log_queue.all_tasks_done:
+        assert monitor._log_queue.all_tasks_done.wait_for(
+            lambda: monitor._log_queue.unfinished_tasks == 0, timeout=3)
+    with monitor.log_file.open(newline='') as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 350030
+    assert [float(row['value']) for row in rows[-30:]] == [29 + i / 1000 for i in range(30)]
+
+
 def test_real_mqtt_actual_driver_caps_automatic_and_manual_power(system, monkeypatch):
     """Exercise Pi driver callbacks and PWM arguments, rather than the simulator."""
     from unittest.mock import Mock

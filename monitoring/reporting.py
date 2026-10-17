@@ -1,5 +1,7 @@
 """File-based reports and interval bubble rates; never reads live card values."""
 from datetime import datetime
+from contextlib import nullcontext
+from io import BytesIO
 from pathlib import Path
 import math
 
@@ -7,9 +9,13 @@ import pandas as pd
 import config
 
 
-def read_table(path, columns):
+def read_table(path, columns, file_lock=None):
     try:
-        data = pd.read_csv(Path(path))
+        # Copy a complete snapshot while the local CSV writer is between rows.
+        # Parsing and sorting are the expensive work and happen after release.
+        with file_lock if file_lock is not None else nullcontext():
+            content = Path(path).read_bytes()
+        data = pd.read_csv(BytesIO(content))
     except (FileNotFoundError, pd.errors.EmptyDataError):
         return pd.DataFrame(columns=columns)
     if not set(columns).issubset(data.columns):

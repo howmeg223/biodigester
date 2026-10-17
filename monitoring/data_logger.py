@@ -2,6 +2,7 @@
 import csv
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -11,14 +12,24 @@ class DataLogger:
     def __init__(self, reading_file, fault_file):
         self.reading_file = Path(reading_file)
         self.fault_file = Path(fault_file)
+        # Archive readers copy bytes under this lock, then release it before
+        # parsing. It must never be the monitor's live-state lock.
+        self.file_lock = threading.RLock()
 
     def log_reading(self, timestamp, sensor, value, source="sensor", sample_id="", excluded=False):
         """Preserve old CSV rows while adding analysis metadata to the schema."""
         header = ["timestamp", "sensor", "value", "source", "sample_id", "excluded"]
-        self._ensure_reading_schema(header)
         row = [timestamp.isoformat(timespec="milliseconds"), sensor, value, source, sample_id, excluded]
-        with self.reading_file.open("a", newline="", encoding="utf-8") as stream:
-            csv.writer(stream).writerow(row)
+        with self.file_lock:
+            self._ensure_reading_schema(header)
+            with self.reading_file.open("a", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerow(row)
+
+    def _append(self, path, header, row):
+        with self.file_lock:
+            self._ensure(path, header)
+            with path.open("a", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerow(row)
 
     def _ensure_reading_schema(self, header):
         self._ensure(self.reading_file, header)
@@ -47,21 +58,16 @@ class DataLogger:
 
     def log_sampling_event(self, file, timestamp, event, reason, resume_at=""):
         path = Path(file)
-        self._ensure(path, ["timestamp", "event", "reason", "resume_at"])
-        with path.open("a", newline="", encoding="utf-8") as stream:
-            csv.writer(stream).writerow([timestamp.isoformat(timespec="milliseconds"), event,
-                                         reason, resume_at])
+        self._append(path, ["timestamp", "event", "reason", "resume_at"],
+                     [timestamp.isoformat(timespec="milliseconds"), event, reason, resume_at])
 
     def log_coverage(self, file, timestamp, available):
         path = Path(file)
-        self._ensure(path, ["timestamp", "available"])
-        with path.open("a", newline="", encoding="utf-8") as stream:
-            csv.writer(stream).writerow([timestamp.isoformat(timespec="milliseconds"), available])
+        self._append(path, ["timestamp", "available"],
+                     [timestamp.isoformat(timespec="milliseconds"), available])
 
     def log_fault_event(self, timestamp, event):
         """Add a fault change, such as RAISED, ACKNOWLEDGED or CLEARED."""
-        self._ensure(self.fault_file,
-                     ["timestamp", "event", "code", "category", "severity", "message", "action"])
         row = [
             timestamp.isoformat(timespec="seconds"),
             event.get("event", ""),
@@ -71,9 +77,8 @@ class DataLogger:
             event.get("message", ""),
             event.get("action", ""),
         ]
-        with self.fault_file.open("a", newline="", encoding="utf-8") as log_file:
-            writer = csv.writer(log_file)
-            writer.writerow(row)
+        self._append(self.fault_file,
+                     ["timestamp", "event", "code", "category", "severity", "message", "action"], row)
 
     @staticmethod
     def _ensure(path, header):
@@ -86,7 +91,6 @@ class DataLogger:
     def log_bubble_event(self, file, timestamp, event):
         path = Path(file)
         keys = ("session", "count", "raw", "baseline", "drop", "threshold", "hold_seconds")
-        self._ensure(path, ["timestamp", *keys])
-        with path.open("a", newline="", encoding="utf-8") as stream:
-            csv.writer(stream).writerow([timestamp.isoformat(timespec="milliseconds"),
-                                         *(event.get(key, "") for key in keys)])
+        self._append(path, ["timestamp", *keys],
+                     [timestamp.isoformat(timespec="milliseconds"),
+                      *(event.get(key, "") for key in keys)])
