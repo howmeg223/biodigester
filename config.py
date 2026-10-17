@@ -81,7 +81,7 @@ PELTIER_RPWM_PIN = 18
 PELTIER_LPWM_PIN = 19
 PELTIER_PWM_FREQUENCY_HZ = 1000
 # Single power setting: automatic heating duty and maximum duty in either direction.
-PELTIER_MAX_POWER = 10
+PELTIER_MAX_POWER = 17
 PELTIER_DIRECTION_CHANGE_DELAY_S = 0.050
 PELTIER_COMMAND_TIMEOUT_S = 10.0
 PELTIER_DEADBAND_PERCENT = 1.0
@@ -90,8 +90,8 @@ PELTIER_FEEDBACK_TOLERANCE_PERCENT = 1.0
 
 
 # ---------------------------------------------------------- Temperature control
-DEFAULT_LOW_C = 35.0
-DEFAULT_HIGH_C = 37.0
+DEFAULT_LOW_C = 31.0
+DEFAULT_HIGH_C = 45.0
 THRESHOLD_MIN_C = 20.0
 THRESHOLD_MAX_C = 60.0
 MIN_BAND_C = 0.5
