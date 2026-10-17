@@ -101,7 +101,7 @@ MIN_ON_S = 5.0
 MIN_OFF_S = 5.0
 
 # ---------------------------------------------------------- Sensor diagnostics
-TEMP_STALE_AFTER_S = 10.0
+TEMP_STALE_AFTER_S = 60.0
 TEMP_PLAUSIBLE_MIN_C = 0.0
 TEMP_PLAUSIBLE_MAX_C = 70.0
 TEMP_STUCK_WINDOW_S = 600.0
