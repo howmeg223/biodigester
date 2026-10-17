@@ -70,17 +70,29 @@ def coverage_intervals(coverage, end):
     return intervals
 
 
+def bubble_interval_minutes(start, end, minutes="auto"):
+    """Choose a bounded interval for long archives, preserving explicit choices."""
+    if minutes == "auto":
+        duration = (pd.Timestamp(end)-pd.Timestamp(start)).total_seconds()/60
+        required = duration/max(1, getattr(config, "REPORT_MAX_BINS", 20000)-1)
+        choices = (1, 2, 5, 10, 15, 30, 60, 120, 240, 360, 720, 1440)
+        return next((n for n in choices if n >= required), math.ceil(required/1440)*1440)
+    if (isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or
+            not math.isfinite(minutes) or minutes < 1):
+        raise ValueError("Bubble interval must be at least one minute")
+    return minutes
+
+
 def bubble_rate(events, coverage, start, end, minutes=1, exclusions=()):
     """Count unique events in fixed bins and divide by bin duration in minutes.
 
-    Missing coverage or a sampling interval produces NaN, never invented zeros.
-    Old event-only files can show counts where events exist, but do not establish
-    zero-bubble coverage. No straight-line interpolation across outages is done.
+    Recorded events remain visible when coverage is incomplete; those rates are
+    lower bounds and are labelled accordingly. Quiet bins need full coverage to
+    establish zero. Sampling intervals stay excluded. No interpolation is done.
     """
     start, end = pd.Timestamp(start), pd.Timestamp(end)
     if start >= end: raise ValueError("Start must be before end")
-    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not math.isfinite(minutes) or minutes < 1:
-        raise ValueError("Bubble interval must be at least one minute")
+    minutes = bubble_interval_minutes(start, end, minutes)
     width = pd.Timedelta(minutes=minutes)
     if (end-start)/width > getattr(config, "REPORT_MAX_BINS", 20000):
         raise ValueError("Time range is too large for that bubble interval; choose a larger interval or shorter range")
@@ -103,10 +115,14 @@ def bubble_rate(events, coverage, start, end, minutes=1, exclusions=()):
         available = index < len(known) and known[index][0] <= left and known[index][1] >= right
         paused = any(a < right and b > left for a,b in exclusions)
         count = int(counts.get(edge, 0))
-        # Old files have event evidence but cannot establish quiet intervals.
-        legacy = coverage.empty and count > 0
-        value = count * 60.0 / seconds if not paused and (available or legacy) else math.nan
+        # A missing heartbeat does not erase events already present in the CSV.
+        # It does prevent claiming that no recorded events means no detections.
+        value = count * 60.0 / seconds if not paused and (available or count > 0) else math.nan
         rows.append({"timestamp": left, "sensor": "bubble_rate", "value": value,
                      "count": count, "interval_seconds": seconds,
-                     "source": "events" if available else "events (coverage unknown)", "excluded": paused})
-    return pd.DataFrame(rows)
+                     "coverage_confirmed": available,
+                     "source": "events" if available else "events (coverage incomplete; recorded count only)",
+                     "excluded": paused})
+    result = pd.DataFrame(rows)
+    result.attrs["bubble_interval_minutes"] = minutes
+    return result

@@ -28,6 +28,7 @@ monitor = MonitoringService()
 lock = monitor.lock
 
 RANGES = {
+    "Latest logged 24 hours": "latest",
     "Last 15 minutes": 15,
     "Last hour": 60,
     "Last 6 hours": 360,
@@ -51,37 +52,48 @@ def read_analysis_files(include_bubbles=True):
     return readings, events, markers, coverage
 
 
-def load_df(minutes=None, include_sampling=False):
-    with lock:
-        readings = read_table(monitor.log_file, ["timestamp", "sensor", "value"])
-        markers = read_table(monitor.sampling_file, ["timestamp", "event"])
-    df = analysis_readings(readings, sampling_intervals(markers), include_sampling)
-    if minutes and len(df):
-        df = df[df["timestamp"] >= datetime.now() - timedelta(minutes=minutes)]
-    return df
+def load_df(minutes=None, include_sampling=False, keys=None):
+    return report_data(keys or list(config.SENSORS), minutes,
+                       include_sampling=include_sampling)[0]
 
 
-def report_data(keys, minutes=None, start=None, end=None, interval=1, include_sampling=False):
+def report_data(keys, minutes=None, start=None, end=None, interval="auto", include_sampling=False):
     readings, events, markers, coverage = read_analysis_files("bubble_rate" in keys)
-    end = pd.Timestamp(end or datetime.now())
+    selected = readings[readings.sensor.isin(keys)]
+    archives = (selected, events, coverage) if "bubble_rate" in keys else (selected,)
+    archives = [frame for frame in archives if not frame.empty]
+    latest = max((frame.timestamp.max() for frame in archives), default=None)
+    earliest = min((frame.timestamp.min() for frame in archives), default=None)
+    # Archive modes follow recorded timestamps, independent of process restart
+    # time or a wall clock that has since moved. Add one microsecond so the
+    # newest observation is included in the half-open interval.
+    archive_mode = start is None and minutes in (None, "latest")
+    if end is None:
+        end = latest + pd.Timedelta(microseconds=1) if archive_mode and latest is not None else datetime.now()
+    end = pd.Timestamp(end)
     if start is None:
-        if minutes:
+        if minutes == "latest":
+            start = end - pd.Timedelta(hours=24)
+        elif minutes:
             start = end - pd.Timedelta(minutes=minutes)
         else:
-            stamps = [df.timestamp.min() for df in (readings,events,coverage) if not df.empty]
-            start = min(stamps) if stamps else end - pd.Timedelta(hours=1)
+            start = earliest if earliest is not None else end - pd.Timedelta(hours=1)
     start = pd.Timestamp(start)
     if start >= end:
         raise ValueError("Start must be before end")
     periods = sampling_intervals(markers, end)
     df = analysis_readings(readings, periods, include_sampling)
     df = df[df.sensor.isin(keys) & (df.timestamp >= start) & (df.timestamp < end)]
+    effective_interval = None
     if "bubble_rate" in keys:
         coverage = coverage[(coverage.timestamp >= start-pd.Timedelta(seconds=config.PRESSURE_STALE_AFTER_S)) & (coverage.timestamp <= end)]
         rate = bubble_rate(events, coverage, start, end, interval,
                            () if include_sampling else periods)
+        effective_interval = rate.attrs["bubble_interval_minutes"]
         df = pd.concat([df, rate], ignore_index=True)
-    return df.sort_values("timestamp", kind="stable"), periods, start, end
+    df = df.sort_values("timestamp", kind="stable")
+    df.attrs["bubble_interval_minutes"] = effective_interval
+    return df, periods, start, end
 
 
 def graph_samples(data, key, periods, start, end, include_sampling):
@@ -125,14 +137,17 @@ def history_fig(key, minutes, limits=None):
     """Plot one sensor's history with temperature limits where applicable."""
     df, periods, start, end = report_data([key], minutes)
     if key == "ph":
-        return ph_figure(df, limits)
+        return ph_figure(df, limits).update_layout(uirevision=f"ph:{minutes}")
     if df.empty:
-        return empty_fig("No logged data yet for this sensor")
+        if not monitor.log_file.exists():
+            return empty_fig(f"Sensor CSV missing: {monitor.log_file}")
+        return empty_fig("No logged data for this sensor in the selected range")
     sensor = config.SENSORS[key]
     df = graph_samples(df, key, periods, start, end, False)
-    fig = go.Figure(go.Scatter(x=df["timestamp"], y=df["value"], mode="lines", connectgaps=False))
+    fig = go.Figure(go.Scatter(x=df["timestamp"], y=df["value"], mode="lines+markers",
+                              marker={"size": 3}, connectgaps=False))
     fig.update_layout(height=380, margin={"t": 20},
-                      yaxis_title=f"{sensor['label']} ({sensor['unit']})", uirevision=key)
+                      yaxis_title=f"{sensor['label']} ({sensor['unit']})", uirevision=f"{key}:{minutes}")
     if key == "temperature":
         status = monitor.controller_status()
         if "low" in status and "high" in status:
@@ -143,7 +158,7 @@ def history_fig(key, minutes, limits=None):
     return fig
 
 
-def report_fig(keys, minutes, limits=None, start=None, end=None, interval=1, include_sampling=False):
+def report_fig(keys, minutes, limits=None, start=None, end=None, interval="auto", include_sampling=False):
     """Compare CSV histories on separate axes, including calculated bubble rates."""
     keys = [key for key in dict.fromkeys(keys or []) if key in REPORT_SENSORS]
     if not keys:
@@ -156,8 +171,8 @@ def report_fig(keys, minutes, limits=None, start=None, end=None, interval=1, inc
         data = graph_samples(df[df.sensor == key], key, periods, start, end, include_sampling)
         sensor = REPORT_SENSORS[key]
         fig.add_trace(go.Scatter(x=data["timestamp"], y=data["value"],
-                                 mode="markers" if key == "ph" else "lines",
-                                 marker=ph_markers(data, limits) if key == "ph" else None,
+                                 mode="markers" if key == "ph" else "lines+markers",
+                                 marker=ph_markers(data, limits) if key == "ph" else {"size": 3},
                                  customdata=data["source"], connectgaps=False,
                                  line={"shape": "hv"} if key == "bubble_rate" else None,
                                  hovertemplate="%{x}<br>%{y:.3f}<br>%{customdata}<extra></extra>",
@@ -170,8 +185,10 @@ def report_fig(keys, minutes, limits=None, start=None, end=None, interval=1, inc
                 fig.add_vrect(x0=max(a,start), x1=min(b,end), fillcolor="#f59e0b", opacity=.15,
                               line_width=0, row=row, col=1)
     fig.update_xaxes(range=[start, end])
+    actual_interval = df.attrs.get("bubble_interval_minutes")
+    interval_label = f" · bubble interval {actual_interval:g} min" if actual_interval is not None else ""
     fig.update_layout(height=260 * len(keys) + 80, margin={"t": 30}, showlegend=False,
-                      title=f"CSV report · bubble interval {interval:g} min · sampling periods {'included' if include_sampling else 'excluded'}")
+                      title=f"CSV report{interval_label} · sampling periods {'included' if include_sampling else 'excluded'}")
     return fig
 
 
@@ -245,6 +262,7 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
     html.H2("Biodigester Monitoring Application"),
     html.Div(id="status", style={"marginBottom": "12px"}),
     html.Div(id="logging-status", role="status", style={"color": "#b3261e"}),
+    html.Div(id="archive-status", role="status", style={"color": "#b45309", "marginBottom": "8px"}),
     html.Div(style={"padding": "16px", "background": "#fff7e6", "borderRadius": "10px", "marginBottom": "16px"}, children=[
         html.H3("Vessel sampling"),
         html.P("Pause analysis before opening the vessel. Raw readings and alarms are still recorded; temperature control stays active. "
@@ -301,7 +319,7 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
         html.H4("pH measurements over time"),
         html.P("Each dot is one measurement. Simulation records one sample every 10 seconds. "
                "Dot colours use the currently saved limits."),
-        dcc.Dropdown(range_options, "Last hour", id="ph-history-range", clearable=False,
+        dcc.Dropdown(range_options, "Latest logged 24 hours", id="ph-history-range", clearable=False,
                      style={"width": "220px"}),
         dcc.Graph(id="ph-graph"),
     ]),
@@ -336,19 +354,22 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
     dcc.Tabs([
         dcc.Tab(label="Sensor history", children=[
             html.H3(id="sensor-title"), html.P(id="sensor-desc"),
-            dcc.Dropdown(range_options, "Last hour", id="hist-range", clearable=False, style={"width": "220px"}),
+            dcc.Dropdown(range_options, "Latest logged 24 hours", id="hist-range", clearable=False, style={"width": "220px"}),
             dcc.Graph(id="hist-graph"),
         ]),
         dcc.Tab(label="Report generator", children=[
             html.Div(style={"marginTop": "12px"}, children=[
                 html.H3("Report generator"),
                 html.P("Source: saved CSV files. Choose sensors and a time range. Each sensor has its own axis. "
-                       "Bubble rate = events per interval divided by interval duration in minutes; gaps indicate unconfirmed coverage or sampling. "
+                       "Bubble rate = recorded events per interval divided by interval duration in minutes. "
+                       "Incomplete coverage is labelled in the hover text and CSV; recorded rates may undercount detections. "
+                       "Quiet intervals with unknown coverage and sampling periods remain gaps. "
+                       "Latest logged 24 hours follows the archive, even after a restart. "
                        "Large temperature/pressure graphs use interval means; CSV exports retain individual samples."),
                 dcc.Checklist(id="report-sensors", value=["temperature", "pressure", "bubble_rate"], inline=True,
                               options=[{"label": f" {REPORT_SENSORS[k]['label']}  ", "value": k}
                                        for k in REPORT_SENSORS]),
-                dcc.Dropdown(range_options + [{"label": "Custom dates", "value": "Custom dates"}], "Last hour", id="report-range", clearable=False, style={"width": "220px"}),
+                dcc.Dropdown(range_options + [{"label": "Custom dates", "value": "Custom dates"}], "Latest logged 24 hours", id="report-range", clearable=False, style={"width": "220px"}),
                 html.Div(id="custom-report-range", children=[
                     html.Label("Custom dates (Pi local time) "),
                     dcc.DatePickerRange(id="report-dates", display_format="DD MMM YYYY"),
@@ -356,8 +377,9 @@ app.layout = html.Div(style={"fontFamily": "sans-serif", "maxWidth": "1050px", "
                     html.Label(" End time "), dcc.Input(id="report-end-time", type="text", value="23:59", style={"width": "80px"}),
                 ]),
                 html.Label("Bubble-rate interval "),
-                dcc.Dropdown([{"label": f"{n} minute{'s' if n>1 else ''}", "value": n} for n in (1,5,15,60)],
-                             1, id="bubble-interval", clearable=False, style={"width": "180px"}),
+                dcc.Dropdown([{"label": "Automatic", "value": "auto"}] +
+                             [{"label": f"{n} minute{'s' if n>1 else ''}", "value": n} for n in (1,5,15,60,240,1440)],
+                             "auto", id="bubble-interval", clearable=False, style={"width": "180px"}),
                 dcc.Checklist(id="include-sampling", options=[{"label": " Include sampling periods in analysis", "value": "include"}], value=[]),
                 html.Button("Generate / refresh report", id="generate-report", n_clicks=0),
                 html.Button("Download report CSV", id="download-report", n_clicks=0),
@@ -453,7 +475,7 @@ def report_bounds(range_name, start_date, end_date, start_time, end_time):
               Input("report-start-time", "value"), Input("report-end-time", "value"),
               Input("bubble-interval", "value"), Input("include-sampling", "value"))
 def update_report(keys, range_name, _, limits=None, start_date=None, end_date=None,
-                  start_time="00:00", end_time="23:59", interval=1, include=None):
+                  start_time="00:00", end_time="23:59", interval="auto", include=None):
     try:
         minutes, start, end = report_bounds(range_name, start_date, end_date, start_time, end_time)
         return report_fig(keys, minutes, limits, start, end, interval, "include" in (include or [])), ""
@@ -506,6 +528,19 @@ def refresh_sampling(_):
 def refresh_logging(_):
     errors = monitor.logging_status()
     return ("CSV logging needs attention: " + "; ".join(f"{key}: {value}" for key, value in errors.items())) if errors else ""
+
+
+@app.callback(Output("archive-status", "children"), Input("tick", "n_intervals"))
+def refresh_archive_status(_):
+    try:
+        if not monitor.log_file.exists():
+            return (f"Sensor CSV missing: {monitor.log_file}. Temperature, pressure and pH history "
+                    "need this file. Keep or restore the existing archive; a GitHub code update does not restore it.")
+        if monitor.log_file.stat().st_size == 0:
+            return f"Sensor CSV is empty: {monitor.log_file}. Waiting for logged measurements."
+    except OSError as exc:
+        return f"Cannot access sensor CSV: {exc}"
+    return ""
 
 
 @app.callback(Output("controller-status", "children"), Output("save-range", "disabled"),
@@ -601,8 +636,9 @@ def restore_ph_limits(limits):
 def refresh_ph(_, limits, range_name):
     low, high = ph_limits(limits)
     try:
-        data = load_df(RANGES[range_name])
+        data = load_df(RANGES[range_name], keys=["ph"])
         figure = ph_figure(data[data["sensor"] == "ph"], limits)
+        figure.update_layout(uirevision=f"ph:{range_name}")
     except (ValueError, OSError, pd.errors.ParserError) as exc:
         figure = empty_fig(f"Cannot read pH CSV history: {exc}")
     latest, _, connected = monitor.snapshot()

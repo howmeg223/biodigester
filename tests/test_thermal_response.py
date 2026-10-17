@@ -100,7 +100,7 @@ def test_old_heating_setting_uses_cap_for_commands_and_feedback(monkeypatch):
     assert 'PELTIER_POWER_MISMATCH' not in controller.faults.active_codes()
 
 
-@pytest.mark.parametrize('limit', [5, 30, 65, 100])
+@pytest.mark.parametrize('limit', [5, 10, 30, 65, 100])
 def test_one_config_setting_controls_actual_heating_command(monkeypatch, limit):
     monkeypatch.setattr(config, 'PELTIER_MAX_POWER', limit)
     # A leftover old setting must not restrict or override the new one.
