@@ -155,8 +155,15 @@ def test_real_mqtt_and_http_graphs_with_350000_archive_rows(system, monkeypatch)
             lambda: monitor._log_queue.unfinished_tasks == 0, timeout=3)
     with monitor.log_file.open(newline='') as stream:
         rows = list(csv.DictReader(stream))
-    assert len(rows) == 350030
-    assert [float(row['value']) for row in rows[-30:]] == [29 + i / 1000 for i in range(30)]
+    # Fixture startup can leave simulator MQTT messages in flight after the
+    # writer queue briefly empties. Those legitimate readings may append too.
+    # Verify every deliberate publication, including its order and uniqueness,
+    # rather than assuming there are no other sensor messages on the broker.
+    assert len(rows) >= 350030
+    assert rows[349999]['sensor'] == 'temperature' and float(rows[349999]['value']) == 29.125
+    published = [float(row['value']) for row in rows[350000:]
+                 if row['sensor'] == 'temperature' and 29 <= float(row['value']) < 29.03]
+    assert published == [29 + i / 1000 for i in range(30)]
 
 
 def test_real_mqtt_actual_driver_caps_automatic_and_manual_power(system, monkeypatch):

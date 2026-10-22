@@ -206,6 +206,9 @@ class PressureHardwareClient:
                   "recoveries": self.detector.recovery_count}, retain=True)
             if result:
                 send(self.client, config.TOPIC_PRESSURE_DROP, {"drop": round(result["drop"])}, retain=True)
+                send(self.client, getattr(config, "TOPIC_PRESSURE_WINDOW_DROP",
+                     f"{config.ROOT}/diagnostics/pressure/window_drop"),
+                     {"drop": round(result["window_drop"]), "window_seconds": self.detector.drop_window_seconds}, retain=True)
                 send(self.client, config.TOPIC_PRESSURE_THRESHOLD, {"threshold": round(result["threshold"])}, retain=True)
         return result
 
@@ -240,6 +243,9 @@ class PressureHardwareClient:
                 log.info("Bubble detector=%s; maximum active drop=%gs; recovery window=%gs",
                          BUBBLE_DETECTOR_VERSION, self.detector.max_active_seconds,
                          self.detector.recovery_seconds)
+                log.info("Bubble fall window=%gs; local rearm rise=%g%% of trigger; release hold=%gs",
+                         self.detector.drop_window_seconds, 100*config.PRESSURE_RELEASE_THRESHOLD_RATIO,
+                         config.PRESSURE_CLEAR_HOLD_SECONDS)
             if self.mode != "bubble" and not self.calibration_enabled():
                 log.warning("kPa publication disabled: set PRESSURE_ZERO_RAW, PRESSURE_CAL_RAW and PRESSURE_CAL_KPA in config.py")
             connect_and_start(self.client, "pressure-hardware")

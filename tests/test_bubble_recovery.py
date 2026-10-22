@@ -36,6 +36,9 @@ def warmup(detector):
 
 
 def activate(detector, raw, now=1):
+    # Samples normally arrive at 40 Hz; establish the pre-drop level just
+    # before this synthetic pulse rather than inventing a long sample gap.
+    detector.update(detector.previous_raw, now-.025)
     assert detector.update(raw, now)['event'] is None
     event = detector.update(raw, now+.16)['event']
     assert event is not None
@@ -76,22 +79,25 @@ def test_exact_reported_baseline_and_raw_trace(monkeypatch):
     trace = [1793120, 1793912, 1794442, 1795436, 1796393, 1796363]
     for i, raw in enumerate(trace):
         result = detector.update(raw, 1.2+i*.2)
-        assert round(result['drop']) == BASELINE-raw
+        assert result['event'] is None
     for i in range(150):
         result = detector.update(1796363, 2.4+i*.1)
         assert result['event'] is None
-    assert detector.count == 216 and detector.recovery_count == 1
+    # The local pressure rise now rearms without waiting for the old 1.85M
+    # baseline. The remaining static offset cannot count again by itself.
+    assert detector.count == 216 and detector.recovery_count == 0
     assert detector.ready and not detector.active
-    assert detector.baseline == 1796363 and result['drop'] == 0
+    assert abs(detector.baseline - 1796363) < 50
 
 
 def test_recovery_finishes_while_pressure_is_rising():
     detector = BubbleDetector()
     warmup(detector)
     activate(detector, BASELINE-50000)
+    detector.update(BASELINE-50000, 2.2)  # Held step first enters recovery.
     for i in range(20):
         raw = BASELINE-50000 + i*500
-        assert detector.update(raw, 1.2+i*.1)['event'] is None
+        assert detector.update(raw, 2.3+i*.1)['event'] is None
     assert detector.ready and not detector.recovering
     assert detector.count == 1 and detector.recovery_count == 1
 
@@ -213,6 +219,7 @@ def test_pressure_telemetry_marks_recovery_and_keeps_kpa_publication(monkeypatch
     assert payloads[config.TOPIC_BUBBLE]['bubble'] is False
     assert payloads[config.TOPIC_BUBBLE]['count'] == 1
     assert payloads[config.TOPIC_PRESSURE]['pressure'] == round(original_pressure, 4)
+    assert f'{config.ROOT}/diagnostics/pressure/window_drop' in payloads
     assert config.TOPIC_BUBBLE_EVENT not in payloads
     for i in range(1, 7):
         hardware.process_sample(BASELINE-50000, 2.2+i*.1, publish=False)
