@@ -16,7 +16,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
-from pi.bubble_detection import BubbleDetector
+from pi.bubble_detection import BUBBLE_DETECTOR_VERSION, BubbleDetector
 from mqtt_common import connect_and_start, connected_ok, make_client, read_json, send, stop_requested
 
 log = logging.getLogger("pressure-hardware")
@@ -174,13 +174,25 @@ class PressureHardwareClient:
             send(self.client, config.TOPIC_PRESSURE_STATUS, self.latest_status, retain=True)
             log.info("Relearning bubble baseline after sampling; count preserved")
         result = self.detector.update(raw, now) if self.mode != "pressure" else None
+        transition = result.get("transition") if result else None
+        if transition == "recovering":
+            log.warning("Bubble detector recovering from sustained pressure shift; count=%d baseline=%s",
+                        self.detector.count, self.detector.baseline)
+        elif transition == "recovered":
+            log.info("Bubble detector resumed with new baseline=%s; count=%d",
+                     self.detector.baseline, self.detector.count)
         if result and result["event"]:
             event = {**result["event"], "session": self.session, "timestamp": time.time()}
             send(self.client, config.TOPIC_BUBBLE_EVENT, event)
-        if not publish:
+        if not publish and transition is None:
             return result
-        self.latest_status = {"online": True, "ready": self.mode == "pressure" or result is not None,
-            "mode": self.mode, "calibrated": self.calibration_enabled(), "error": None}
+        ready = self.mode == "pressure" or self.detector.ready
+        self.latest_status = {"online": True, "ready": ready,
+            "mode": self.mode, "calibrated": self.calibration_enabled(), "error": None,
+            "detector_version": BUBBLE_DETECTOR_VERSION,
+            "detector_state": "disabled" if self.mode == "pressure" else self.detector.state,
+            "recovery_reason": self.detector.recovery_reason,
+            "recovery_count": self.detector.recovery_count}
         send(self.client, config.TOPIC_PRESSURE_STATUS, self.latest_status, retain=True)
         send(self.client, config.TOPIC_PRESSURE_RAW, {"raw": raw}, retain=True)
         if self.mode != "bubble" and self.calibration_enabled():
@@ -188,7 +200,10 @@ class PressureHardwareClient:
         if self.mode != "pressure":
             send(self.client, config.TOPIC_BUBBLE,
                  {"bubble": self.detector.active, "count": self.detector.count,
-                  "session": self.session, "ready": result is not None}, retain=True)
+                  "session": self.session, "ready": ready,
+                  "state": self.detector.state,
+                  "baseline": round(self.detector.baseline) if self.detector.baseline is not None else None,
+                  "recoveries": self.detector.recovery_count}, retain=True)
             if result:
                 send(self.client, config.TOPIC_PRESSURE_DROP, {"drop": round(result["drop"])}, retain=True)
                 send(self.client, config.TOPIC_PRESSURE_THRESHOLD, {"threshold": round(result["threshold"])}, retain=True)
@@ -221,6 +236,10 @@ class PressureHardwareClient:
             self.setup_gpio()
             log.info("Pressure mode=%s; calibration=%s", self.mode,
                      "enabled" if self.calibration_enabled() else "not configured")
+            if self.mode != "pressure":
+                log.info("Bubble detector=%s; maximum active drop=%gs; quiet relearn window=%gs",
+                         BUBBLE_DETECTOR_VERSION, self.detector.max_active_seconds,
+                         self.detector.relearn_stable_seconds)
             if self.mode != "bubble" and not self.calibration_enabled():
                 log.warning("kPa publication disabled: set PRESSURE_ZERO_RAW, PRESSURE_CAL_RAW and PRESSURE_CAL_KPA in config.py")
             connect_and_start(self.client, "pressure-hardware")
