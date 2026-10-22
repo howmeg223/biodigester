@@ -110,8 +110,8 @@ TEMP_STUCK_MAX_SPAN_C = 0.02
 # ---------------------------------------------------------- Process protection
 # PLACEHOLDER limits. These are intentionally independent from the normal control band.
 LOW_TEMP_WARNING_C = 32.0
-HIGH_TEMP_C = 40.0
-HIGH_HIGH_TEMP_C = 42.0
+HIGH_TEMP_C = 45.0
+HIGH_HIGH_TEMP_C = 47.0
 
 # ---------------------------------------------------------- Heater diagnostics
 ACTUATOR_FEEDBACK_TIMEOUT_S = 5.0
