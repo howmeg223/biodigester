@@ -412,12 +412,14 @@ class MonitoringService:
             if not entry:
                 return {"live": False, "description": "Waiting for pressure hardware"}
             data, received, retained = entry
-            live = (self.connected and not retained and data.get("online") is True and
-                    data.get("ready") is True and time.monotonic() - received <= config.PRESSURE_STALE_AFTER_S)
+            connected = self.connected and (self.client is None or self.client.is_connected())
+            live = (connected and not retained and data.get("online") is True and not data.get("error") and
+                    time.monotonic() - received <= config.PRESSURE_STALE_AFTER_S)
+            detector_state = data.get("detector_state", "ready" if data.get("ready") else "warming_up")
             return {**data, "live": live, "description": (
                 f"Mode: {data.get('mode', '?')}; " +
                 ("calibrated" if data.get("calibrated") else "uncalibrated: kPa unavailable") +
-                ("" if live else "; waiting/stale"))}
+                ("; detector " + detector_state.replace("_", " ") if live else "; waiting/stale"))}
 
     def bubble_summary(self):
         with self.lock:
@@ -427,9 +429,15 @@ class MonitoringService:
             entry = self.messages.get(config.TOPIC_BUBBLE)
             data, received, retained = entry if entry else ({}, 0, True)
             pressure = self.pressure_summary()
-            live = (pressure["live"] and pressure.get("mode") in ("bubble", "both") and
+            fresh = (pressure["live"] and
                     not retained and self.connected and now - received <= config.PRESSURE_STALE_AFTER_S)
-            return {"live": live, "active": data.get("bubble", False),
+            enabled = pressure.get("mode") in ("bubble", "both")
+            live = fresh and enabled and pressure.get("ready") is True and data.get("ready", True) is True
+            state = ("stale" if not pressure["live"] else "disabled" if not enabled else
+                     "stale" if not fresh else
+                     "active" if live and data.get("bubble") else "idle" if live else
+                     pressure.get("detector_state", "warming_up"))
+            return {"live": live, "state": state, "active": data.get("bubble", False),
                     "count": data.get("count", 0), "last_bubble": self.last_bubble,
                     "rate": len(self.bubble_events), "session": data.get("session")}
 

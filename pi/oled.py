@@ -51,6 +51,10 @@ def screen_lines(monitor):
     status = monitor.controller_status()
     pressure = monitor.pressure_summary()
     bubbles = monitor.bubble_summary()
+    bubble_text = (f" {bubbles['rate']}/m" if bubbles['live'] else
+                   " relearn" if bubbles.get('state') == 'recovering' else
+                   " warming" if bubbles.get('state') == 'warming_up' else
+                   " off" if bubbles.get('state') == 'disabled' else " stale")
     entry = messages.get(config.TOPIC_PELTIER_STATE)
     output = "Peltier: --"
     if entry and connected and not entry[2] and now - entry[1] <= config.ACTUATOR_FEEDBACK_TIMEOUT_S:
@@ -60,7 +64,7 @@ def screen_lines(monitor):
     faults = status.get("faults", [])
     return [f"Digester {status['mode']}", reading("temperature", "C", config.TEMP_STALE_AFTER_S),
             reading("pressure", "kPa", config.PRESSURE_STALE_AFTER_S) if pressure.get("live") and pressure.get("calibrated") and pressure.get("mode") != "bubble" else "Pressure: --",
-            f"Bubbles: {bubbles['count']}" + (" stale" if not bubbles['live'] else f" {bubbles['rate']}/m"),
+            f"Bubbles: {bubbles['count']}" + bubble_text,
             output, faults[0].get("code", "Fault") if faults else ("MQTT connected" if connected else "MQTT offline")]
 
 

@@ -237,9 +237,9 @@ class PressureHardwareClient:
             log.info("Pressure mode=%s; calibration=%s", self.mode,
                      "enabled" if self.calibration_enabled() else "not configured")
             if self.mode != "pressure":
-                log.info("Bubble detector=%s; maximum active drop=%gs; quiet relearn window=%gs",
+                log.info("Bubble detector=%s; maximum active drop=%gs; recovery window=%gs",
                          BUBBLE_DETECTOR_VERSION, self.detector.max_active_seconds,
-                         self.detector.relearn_stable_seconds)
+                         self.detector.recovery_seconds)
             if self.mode != "bubble" and not self.calibration_enabled():
                 log.warning("kPa publication disabled: set PRESSURE_ZERO_RAW, PRESSURE_CAL_RAW and PRESSURE_CAL_KPA in config.py")
             connect_and_start(self.client, "pressure-hardware")

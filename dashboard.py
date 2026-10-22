@@ -29,7 +29,7 @@ from mqtt_common import stop_requested
 monitor = MonitoringService()
 lock = monitor.lock  # Compatibility for callers; archive work never acquires it.
 archive_cache = ArchiveCache(getattr(config, "DASHBOARD_ARCHIVE_CACHE_S", 10))
-DASHBOARD_VERSION = "live-archive-v3"
+DASHBOARD_VERSION = "live-archive-v4"
 
 RANGES = {
     "Latest logged 24 hours": "latest",
@@ -700,7 +700,8 @@ def refresh_bubbles(_):
     pressure = monitor.pressure_summary()
     bubble = monitor.bubble_summary()
     last = bubble["last_bubble"].strftime("%H:%M:%S") if bubble["last_bubble"] else "none observed"
-    state = ("ACTIVE" if bubble["active"] else "idle") if bubble["live"] else "waiting/stale"
+    state = {"recovering": "relearning baseline", "warming_up": "warming up", "disabled": "disabled"}.get(
+        bubble.get("state"), ("ACTIVE" if bubble["active"] else "idle") if bubble["live"] else "waiting/stale")
     return pressure["description"], (
         f"Bubbles: {state}; count this hardware session: {bubble['count']}; "
         f"observed last 60 s: {bubble['rate']}/min; last observed: {last}")

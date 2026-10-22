@@ -3,13 +3,17 @@ import math
 import statistics
 import config
 
-BUBBLE_DETECTOR_VERSION = "pressure-recovery-v1"
+BUBBLE_DETECTOR_VERSION = "pressure-recovery-v2"
 
 
 class BubbleDetector:
     def __init__(self):
         self.max_active_seconds = self._positive_setting("PRESSURE_MAX_ACTIVE_SECONDS", 10.0)
-        self.relearn_stable_seconds = self._positive_setting("PRESSURE_RELEARN_STABLE_SECONDS", 2.0)
+        self.recovery_seconds = self._positive_setting(
+            "PRESSURE_RECOVERY_SECONDS", getattr(config, "PRESSURE_RELEARN_STABLE_SECONDS", 2.0))
+        self.rise_alpha = self._positive_setting("PRESSURE_BASELINE_RISE_ALPHA", 0.25)
+        if self.rise_alpha > 1:
+            raise ValueError("PRESSURE_BASELINE_RISE_ALPHA must be at most 1")
         self.reset()
 
     @staticmethod
@@ -32,11 +36,10 @@ class BubbleDetector:
         self.clear_start = None
         self.trigger_threshold = None
         self.active_since = None
-        self._opposite_shift_since = None
         self.recovering = False
         self.recovery_reason = None
         self.recovery_count = getattr(self, 'recovery_count', 0)
-        self._quiet_samples = []
+        self._recovery_samples = []
         if hasattr(self, "previous_raw"):
             del self.previous_raw
 
@@ -65,33 +68,36 @@ class BubbleDetector:
         self.recovery_count += 1
         self.active = False
         self.active_since = self.candidate_start = self.clear_start = None
-        self._opposite_shift_since = self.trigger_threshold = None
-        self._quiet_samples = []
+        self.trigger_threshold = None
+        self._recovery_samples = []
         return self._recover(raw, now, transition="recovering")
 
     def _recover(self, raw, now, transition=None):
-        # Never rearm against the old baseline or count during recovery. A
-        # simple timeout-and-rearm would count the same held drop repeatedly.
+        # Rebase after a bounded window, including while pressure is changing.
+        # Requiring a completely quiet window could disable detection forever.
+        # Updating the baseline prevents recounting a held lid-pressure step.
         max_gap = getattr(config, "PRESSURE_READ_TIMEOUT", 1.0)
-        if self._quiet_samples and (now <= self._quiet_samples[-1][0] or
-                now - self._quiet_samples[-1][0] > max_gap):
-            self._quiet_samples = []
-        self._quiet_samples.append((now, raw))
-        values = [value for _, value in self._quiet_samples]
-        quiet_span = max(1.0, self._threshold() * config.PRESSURE_RELEASE_THRESHOLD_RATIO)
-        if max(values) - min(values) > quiet_span:
-            # A fresh movement restarts the settling period. In particular,
-            # an open/pressed lid must not be relearned while it is moving.
-            self._quiet_samples = [(now, raw)]
-        elif len(values) >= 2 and now - self._quiet_samples[0][0] >= self.relearn_stable_seconds:
-            self.baseline = float(statistics.median(values))
-            self.noise = max(float(statistics.pstdev(values)), 1.0)
+        if self._recovery_samples and (now <= self._recovery_samples[-1][0] or
+                now - self._recovery_samples[-1][0] > max_gap):
+            self._recovery_samples = []
+        self._recovery_samples.append((now, raw))
+        values = [value for _, value in self._recovery_samples]
+        if len(values) >= 2 and now - self._recovery_samples[0][0] >= self.recovery_seconds:
+            self.baseline = float(raw)
+            self.noise = self._sample_noise(values)
             self.previous_raw = raw
             self.recovering = False
-            self._quiet_samples = []
+            self._recovery_samples = []
             transition = "recovered"
         return {"drop": self._drop(raw), "threshold": self._threshold(),
                 "event": None, "transition": transition}
+
+    @staticmethod
+    def _sample_noise(values):
+        # Successive differences measure local noise without treating the
+        # entire warmup/recovery pressure ramp as random noise.
+        changes = [abs(b - a) for a, b in zip(values, values[1:])]
+        return max(float(statistics.median(changes)), 1.0) if changes else 1.0
 
     def update(self, raw, now):
         if self.recovering:
@@ -101,19 +107,12 @@ class BubbleDetector:
             if len(self.warmup) < config.PRESSURE_WARMUP_SAMPLES:
                 return None
             self.baseline = float(statistics.median(self.warmup))
-            self.noise = max(float(statistics.pstdev(self.warmup)), 1.0)
+            self.noise = self._sample_noise(self.warmup)
             self.warmup = []
         threshold = self._threshold()
         drop = self._drop(raw)
-        # A sustained shift in the other direction can also leave the slow
-        # baseline far behind, e.g. when a pressed lid is released again.
-        if not self.active and drop <= -threshold:
-            if self._opposite_shift_since is None:
-                self._opposite_shift_since = now
-            elif now - self._opposite_shift_since >= self.max_active_seconds:
-                return self._start_recovery(raw, now, "Sustained pressure shift opposite to the bubble direction")
-        else:
-            self._opposite_shift_since = None
+        # Gas accumulation moves pressure opposite to the bubble drop. Track
+        # that rise promptly; it is normal operation, not a recovery trigger.
         event = None
         if not self.active:
             if drop >= threshold:
@@ -139,7 +138,13 @@ class BubbleDetector:
                 deviation = min(abs(raw - previous), threshold)
                 self.noise += config.PRESSURE_NOISE_ALPHA * (deviation - self.noise)
                 self.noise = max(self.noise, 1.0)
-                self.baseline += config.PRESSURE_BASELINE_ALPHA * (raw - self.baseline)
+                change = raw - self.baseline
+                if drop < 0:
+                    # A single opposite spike must not lift the reference by
+                    # tens of thousands and manufacture a subsequent bubble.
+                    self.baseline += self.rise_alpha * math.copysign(min(abs(change), threshold), change)
+                else:
+                    self.baseline += config.PRESSURE_BASELINE_ALPHA * change
         elif drop <= self.trigger_threshold * config.PRESSURE_RELEASE_THRESHOLD_RATIO:
             if self.clear_start is None:
                 self.clear_start = now
