@@ -83,7 +83,7 @@ def test_real_mqtt_heating_bad_sensor_safety_ack_and_watchdog(system):
     s.fault_injector.apply('none')
     c.temperature_control._last_switch = None
     advance(lambda:s.heater.power==30)
-    s.model.temp_c=43
+    s.model.temp_c=config.HIGH_HIGH_TEMP_C+1
     advance(lambda:s.heater.safety_cutout and 'HIGH_HIGH_TEMPERATURE' in c.faults.active_codes())
     assert s.heater.delivered_power_w==0
     # Cooling below the limit still requires acknowledgement.

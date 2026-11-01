@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import config
+from monitoring.archive_cache import ArchiveCache
 from monitoring.monitoring_service import MonitoringService
 
 
@@ -16,7 +17,7 @@ def page(tmp_path, monkeypatch):
     monitor = MonitoringService(tmp_path/'readings.csv', tmp_path/'faults.csv', tmp_path/'bubbles.csv')
     monkeypatch.setattr(dashboard, 'monitor', monitor)
     monkeypatch.setattr(dashboard, 'lock', monitor.lock)
-    monkeypatch.setattr(dashboard, '_archive_cache', {})
+    monkeypatch.setattr(dashboard, 'archive_cache', ArchiveCache(10))
     return dashboard, monitor
 
 
@@ -52,16 +53,15 @@ def test_slow_archive_parse_does_not_block_live_temperature(page, monkeypatch):
 def test_archive_cache_reuses_snapshot_then_refreshes(page, monkeypatch):
     dashboard, monitor = page
     clock = [100.0]
-    monkeypatch.setattr(dashboard.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(dashboard, 'archive_cache', ArchiveCache(10, clock=lambda: clock[0]))
     monitor.logger.log_reading(datetime.now(), 'temperature', 29.0)
     first = dashboard.read_analysis_files(False)[0]
     assert dashboard.read_analysis_files(False)[0] is first
     monitor.logger.log_reading(datetime.now(), 'temperature', 30.0)
-    changed = dashboard.read_analysis_files(False)[0]
-    assert list(changed.value) == [29.0, 30.0]
-    clock[0] += dashboard._ARCHIVE_CACHE_SECONDS
+    assert dashboard.read_analysis_files(False)[0] is first
+    clock[0] += 10
     refreshed = dashboard.read_analysis_files(False)[0]
-    assert refreshed is not changed
+    assert refreshed is not first
     assert list(refreshed.value) == [29.0, 30.0]
     assert list(first.value) == [29.0]
 
