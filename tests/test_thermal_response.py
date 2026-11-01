@@ -137,8 +137,8 @@ def test_over_limit_driver_feedback_trips_on_first_cycle(reported):
 @pytest.mark.parametrize('value,code',[(float('nan'),'TEMP_SENSOR_OUT_OF_RANGE'),
                                      (True,'TEMP_SENSOR_OUT_OF_RANGE'),
                                      (-127,'TEMP_SENSOR_OUT_OF_RANGE'),
-                                     (40.1,'HIGH_TEMPERATURE'),
-                                     (43,'HIGH_HIGH_TEMPERATURE')])
+                                     (config.HIGH_TEMP_C+0.1,'HIGH_TEMPERATURE'),
+                                     (config.HIGH_HIGH_TEMP_C+1,'HIGH_HIGH_TEMPERATURE')])
 def test_real_sensor_and_temperature_faults_still_force_zero(value,code):
     clock,client,controller=controller_with_clock()
     assert heat_cycle(clock,client,controller,0)['heating']

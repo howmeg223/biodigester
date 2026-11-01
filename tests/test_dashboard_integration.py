@@ -1,6 +1,8 @@
 """Exercise Dash's actual HTTP callback transport and archived-data failure paths."""
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +16,54 @@ def page(tmp_path, monkeypatch):
     monitor = MonitoringService(tmp_path/'readings.csv', tmp_path/'faults.csv', tmp_path/'bubbles.csv')
     monkeypatch.setattr(dashboard, 'monitor', monitor)
     monkeypatch.setattr(dashboard, 'lock', monitor.lock)
+    monkeypatch.setattr(dashboard, '_archive_cache', {})
     return dashboard, monitor
+
+
+def test_slow_archive_parse_does_not_block_live_temperature(page, monkeypatch):
+    dashboard, monitor = page
+    parsing = threading.Event()
+    release = threading.Event()
+    original = dashboard.read_table
+
+    def slow_read(path, columns, **kwargs):
+        if path == monitor.log_file:
+            parsing.set()
+            assert release.wait(5), "Test did not release archive parser"
+        return original(path, columns, **kwargs)
+
+    monkeypatch.setattr(dashboard, 'read_table', slow_read)
+    monitor.connected = True
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        archive = workers.submit(dashboard.read_analysis_files, False)
+        try:
+            assert parsing.wait(2)
+            live = workers.submit(monitor.handle_message, config.TOPIC_TEMPERATURE,
+                                  b'{"temperature":29.437}')
+            live.result(timeout=2)
+            values, stamps, _ = dashboard.refresh_cards(0)
+            assert values[0] == "29.44 °C"
+            assert stamps[0].startswith("updated ")
+        finally:
+            release.set()
+        archive.result(timeout=2)
+
+
+def test_archive_cache_reuses_snapshot_then_refreshes(page, monkeypatch):
+    dashboard, monitor = page
+    clock = [100.0]
+    monkeypatch.setattr(dashboard.time, 'monotonic', lambda: clock[0])
+    monitor.logger.log_reading(datetime.now(), 'temperature', 29.0)
+    first = dashboard.read_analysis_files(False)[0]
+    assert dashboard.read_analysis_files(False)[0] is first
+    monitor.logger.log_reading(datetime.now(), 'temperature', 30.0)
+    changed = dashboard.read_analysis_files(False)[0]
+    assert list(changed.value) == [29.0, 30.0]
+    clock[0] += dashboard._ARCHIVE_CACHE_SECONDS
+    refreshed = dashboard.read_analysis_files(False)[0]
+    assert refreshed is not changed
+    assert list(refreshed.value) == [29.0, 30.0]
+    assert list(first.value) == [29.0]
 
 
 def callback_request(page, key, overrides=None, changed=None):
